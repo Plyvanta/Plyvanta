@@ -128,7 +128,8 @@ License 2.0. The complete text is in `licenses/Apache-2.0.txt`.
   Startup 1.2.0, Tracing 1.2.0, VersionedParcelable 1.1.1, and WorkManager
   2.11.2. This inventory includes their resolved Android, JVM, KTX, common,
   framework, service, and view-tree artifacts.
-- AndroidX Media3 1.10.1: Common, Container, Database, DataSource, Decoder,
+- AndroidX Media3 1.10.1: Common, Container, Database, DataSource (including
+  the OkHttp extension), Decoder,
   ExoPlayer, DASH, HLS, Extractor, and UI.
 - Kotlin standard library 2.2.21 and JetBrains annotations 23.0.0. See the
   additional Kotlin standard-library notices above.

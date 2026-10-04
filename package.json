@@ -12,11 +12,11 @@
   "scripts": {
     "audit:release": "node scripts/audit-release-tooling.cjs",
     "release": "semantic-release",
-    "test:release": "node --test scripts/semantic-release-config.test.cjs"
+    "test:release": "node --test scripts/*.test.cjs"
   },
   "devDependencies": {
     "@semantic-release/exec": "7.1.0",
     "conventional-changelog-conventionalcommits": "9.3.1",
-    "semantic-release": "25.0.8"
+    "semantic-release": "25.0.9"
   }
 }

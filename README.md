@@ -78,6 +78,33 @@ media stream, and loads the available SponsorBlock segments independently. When
 an enabled segment is reached, playback seeks to its end and briefly offers
 **Undo**.
 
+### Tor routing with Orbot
+
+Install [Orbot](https://orbot.app/en/download/), start it, and wait for it to
+connect to Tor. Enable its SOCKS proxy (normally port **9050**). In Plyvanta,
+open **Settings → Use Tor via Orbot**, then tap **Check Tor connection**. The
+check contacts the Tor Project through that same proxy and reports whether it
+observed a Tor exit. **Open Orbot** opens the companion app; **Orbot SOCKS port**
+can be changed to match its configuration. Orbot VPN mode is optional; in current
+Orbot versions, **General → Power User Mode** allows using its proxy without
+turning on the device VPN. Orbot may request its background-service permissions.
+
+Tor routing covers video and playlist lookups, media playback (including HLS
+and DASH manifests and segments), SponsorBlock, offline media downloads, and
+foreground/background update checks. Destination hostnames are resolved through
+the SOCKS proxy. When Tor is enabled, Plyvanta connects only through Orbot on
+`127.0.0.1`; if the proxy stops, requests fail with no direct fallback. Changing
+the route cancels existing requests and stops online playback; tap **Play** to
+start again. The setting persists across app restarts and applies to background
+checks from application startup.
+
+Tor can be slower and YouTube may reject Tor exits. It hides the network IP
+seen by contacted services; it does not remove identifying information you
+share. A successful connection check describes that request, not continuous
+monitoring. Browser update downloads, bug reports opened in another app, and
+other external links use that app’s own network settings; Plyvanta explains
+this before handing off an update or report while Tor is enabled.
+
 ### Secure offline playback
 
 #### Why the restrictions are so strict

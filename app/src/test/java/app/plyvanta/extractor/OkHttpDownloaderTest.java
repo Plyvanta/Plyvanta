@@ -27,6 +27,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
+import okhttp3.OkHttpClient;
+
 public final class OkHttpDownloaderTest {
     private static final long WAIT_SECONDS = 3L;
 
@@ -50,7 +52,7 @@ public final class OkHttpDownloaderTest {
         })) {
             String url = server.url("/mapped?value=1");
 
-            Response response = new OkHttpDownloader().execute(
+            Response response = new OkHttpDownloader(new OkHttpClient()).execute(
                     Request.newBuilder().get(url).build()
             );
 
@@ -92,7 +94,7 @@ public final class OkHttpDownloaderTest {
             AtomicBoolean interruptRestored = new AtomicBoolean();
             Thread worker = new Thread(() -> {
                 try {
-                    new OkHttpDownloader().execute(
+                    new OkHttpDownloader(new OkHttpClient()).execute(
                             Request.newBuilder().get(server.url("/blocked")).build()
                     );
                     thrown.set(new AssertionError("Blocked request unexpectedly completed"));
@@ -131,7 +133,7 @@ public final class OkHttpDownloaderTest {
         })) {
             IOException exception = assertThrows(
                     IOException.class,
-                    () -> new OkHttpDownloader().execute(
+                    () -> new OkHttpDownloader(new OkHttpClient()).execute(
                             Request.newBuilder().get(server.url("/closed")).build()
                     )
             );

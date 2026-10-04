@@ -9,14 +9,15 @@ import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
+
+import app.plyvanta.network.AppNetwork;
 
 import okhttp3.Call;
 import okhttp3.Callback;
 import okhttp3.MediaType;
-import okhttp3.OkHttpClient;
 import okhttp3.RequestBody;
 import okhttp3.ResponseBody;
 
@@ -28,17 +29,14 @@ public final class OkHttpDownloader extends Downloader {
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) "
                     + "Gecko/20100101 Firefox/140.0";
 
-    private final OkHttpClient client;
+    private final Call.Factory client;
 
     public OkHttpDownloader() {
-        client = new OkHttpClient.Builder()
-                .callTimeout(30, TimeUnit.SECONDS)
-                .connectTimeout(12, TimeUnit.SECONDS)
-                .readTimeout(20, TimeUnit.SECONDS)
-                .writeTimeout(20, TimeUnit.SECONDS)
-                .followRedirects(true)
-                .followSslRedirects(true)
-                .build();
+        this(AppNetwork.calls(AppNetwork.Profile.EXTRACTOR));
+    }
+
+    public OkHttpDownloader(Call.Factory client) {
+        this.client = Objects.requireNonNull(client, "client");
     }
 
     @Override

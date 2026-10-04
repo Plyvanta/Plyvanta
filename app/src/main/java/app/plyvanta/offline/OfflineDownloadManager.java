@@ -7,14 +7,13 @@ import java.io.InterruptedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import app.plyvanta.extractor.OkHttpDownloader;
+import app.plyvanta.network.AppNetwork;
 import app.plyvanta.playback.ResolvedVideo;
 import okhttp3.Call;
-import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
 import okhttp3.ResponseBody;
@@ -82,15 +81,15 @@ public final class OfflineDownloadManager {
     }
 
     private final OfflineMediaStore store;
-    private final OkHttpClient httpClient;
+    private final Call.Factory httpClient;
 
     public OfflineDownloadManager(OfflineMediaStore store) {
-        this(store, buildHttpClient());
+        this(store, AppNetwork.calls(AppNetwork.Profile.OFFLINE));
     }
 
     OfflineDownloadManager(
             OfflineMediaStore store,
-            OkHttpClient httpClient
+            Call.Factory httpClient
     ) {
         this.store = Objects.requireNonNull(store, "store");
         this.httpClient = Objects.requireNonNull(httpClient, "httpClient");
@@ -263,26 +262,6 @@ public final class OfflineDownloadManager {
         } finally {
             cancellation.detach(call);
         }
-    }
-
-    private static OkHttpClient buildHttpClient() {
-        return new OkHttpClient.Builder()
-                .connectTimeout(15, TimeUnit.SECONDS)
-                .readTimeout(30, TimeUnit.SECONDS)
-                .writeTimeout(30, TimeUnit.SECONDS)
-                .callTimeout(0, TimeUnit.MILLISECONDS)
-                .followRedirects(true)
-                .followSslRedirects(false)
-                .addNetworkInterceptor(chain -> {
-                    String target = chain.request().url().toString();
-                    if (!OfflineDownloadEligibility.isTrustedMediaUrl(target)) {
-                        throw new IOException(
-                                "Media redirect left the trusted HTTPS host boundary."
-                        );
-                    }
-                    return chain.proceed(chain.request());
-                })
-                .build();
     }
 
     private static String sanitizeText(
