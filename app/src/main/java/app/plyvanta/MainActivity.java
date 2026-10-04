@@ -75,6 +75,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
+import app.plyvanta.network.AppNetwork;
 import app.plyvanta.offline.ContentKeyProtector;
 import app.plyvanta.offline.OfflineDownloadEligibility;
 import app.plyvanta.offline.OfflineDownloadManager;
@@ -150,6 +151,8 @@ public final class MainActivity extends ComponentActivity {
             Executors.newSingleThreadExecutor();
     private final ExecutorService updateCheckExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService offlineExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService torCheckExecutor = Executors.newSingleThreadExecutor();
+    private final AtomicInteger torSettingsGeneration = new AtomicInteger();
     private final AtomicInteger loadGeneration = new AtomicInteger();
     private final AtomicInteger playlistLoadGeneration = new AtomicInteger();
     private final AtomicInteger offlineForegroundGeneration =
@@ -172,6 +175,7 @@ public final class MainActivity extends ComponentActivity {
     private TextView uploaderText;
     private TextView playbackStatus;
     private TextView protectionStatus;
+    private TextView torRoutingBanner;
     private LinearLayout playlistCard;
     private TextView playlistNameText;
     private TextView playlistPositionText;
@@ -248,6 +252,10 @@ public final class MainActivity extends ComponentActivity {
     private TextView activeUpdateCheckDetail;
     private Button activeUpdateCheckAction;
     private volatile boolean destroyed;
+    private boolean observedTorEnabled;
+    private int observedTorPort;
+    private final Runnable networkRouteListener =
+            () -> mainHandler.post(this::synchronizeNetworkRoute);
 
     private final Runnable hideSkipNotice = () -> {
         if (skipNotice != null) {
@@ -265,6 +273,8 @@ public final class MainActivity extends ComponentActivity {
         configureWindow();
 
         preferenceStore = new PreferenceStore(this);
+        observedTorEnabled = AppNetwork.isTorEnabled();
+        observedTorPort = AppNetwork.torPort();
         updatePreferences = new UpdatePreferences(this);
         updateNotificationsWereAllowed =
                 UpdateNotificationManager.notificationsAllowed(this);
@@ -318,6 +328,7 @@ public final class MainActivity extends ComponentActivity {
         }
         restoreBugReport(savedInstanceState);
         mainHandler.post(() -> maybeExplainUpdateNotifications(getIntent()));
+        AppNetwork.addRouteChangeListener(networkRouteListener);
     }
 
     private void configureBackNavigation() {
@@ -443,6 +454,13 @@ public final class MainActivity extends ComponentActivity {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 dp(58)
         ));
+
+        torRoutingBanner = text(getString(R.string.tor_routing_banner), 12,
+                getColor(R.color.coral));
+        torRoutingBanner.setPadding(dp(18), 0, dp(18), dp(8));
+        torRoutingBanner.setOnClickListener(view -> showSettings());
+        appContent.addView(torRoutingBanner, matchParentWrap());
+        refreshTorBanner();
 
         ScrollView scrollView = new ScrollView(this);
         scrollView.setFillViewport(true);
@@ -2139,6 +2157,8 @@ public final class MainActivity extends ComponentActivity {
         version.setPadding(0, 0, 0, dp(8));
         content.addView(version);
 
+        addTorSettings(content);
+
         TextView updatesLabel = text(
                 getString(R.string.updates),
                 11,
@@ -2279,6 +2299,23 @@ public final class MainActivity extends ComponentActivity {
         );
         about.setPadding(0, dp(20), 0, dp(8));
         android.text.util.Linkify.addLinks(about, android.text.util.Linkify.WEB_URLS);
+        android.text.SpannableString linkedAbout = new android.text.SpannableString(about.getText());
+        for (android.text.style.URLSpan link : linkedAbout.getSpans(
+                0, linkedAbout.length(), android.text.style.URLSpan.class)) {
+            int start = linkedAbout.getSpanStart(link);
+            int end = linkedAbout.getSpanEnd(link);
+            linkedAbout.removeSpan(link);
+            linkedAbout.setSpan(new android.text.style.ClickableSpan() {
+                @Override
+                public void onClick(View view) {
+                    if (!openInBrowser(link.getURL())) {
+                        Toast.makeText(MainActivity.this, R.string.no_app_for_update,
+                                Toast.LENGTH_LONG).show();
+                    }
+                }
+            }, start, end, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        about.setText(linkedAbout);
         about.setMovementMethod(LinkMovementMethod.getInstance());
         content.addView(about);
 
@@ -2326,6 +2363,228 @@ public final class MainActivity extends ComponentActivity {
                     .setTextColor(getColor(R.color.coral));
         });
         dialog.show();
+    }
+
+    private void refreshTorBanner() {
+        if (torRoutingBanner != null) {
+            torRoutingBanner.setVisibility(AppNetwork.isTorEnabled() ? View.VISIBLE : View.GONE);
+        }
+    }
+
+    private void addTorSettings(LinearLayout content) {
+        TextView section = text(getString(R.string.tor_section), 11,
+                getColor(R.color.text_secondary));
+        section.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        section.setPadding(0, dp(16), 0, dp(3));
+        content.addView(section);
+
+        TextView state = text("", 12, getColor(R.color.text_secondary));
+        Button check = textButton(getString(R.string.check_now));
+        TextView portDetail = text("", 12, getColor(R.color.text_secondary));
+        Runnable render = () -> {
+            state.setText(AppNetwork.isTorEnabled()
+                    ? R.string.tor_enabled_unchecked : R.string.tor_disabled);
+            check.setEnabled(AppNetwork.isTorEnabled());
+            check.setText(R.string.check_now);
+            portDetail.setText(getString(R.string.tor_port_detail, AppNetwork.torPort()));
+            refreshTorBanner();
+        };
+        content.addView(settingSwitch(
+                getString(R.string.tor_use), getString(R.string.tor_use_detail),
+                AppNetwork.isTorEnabled(), enabled -> {
+                    applyTorSetting(enabled, AppNetwork.torPort());
+                    render.run();
+                }
+        ));
+
+        Button orbot = textButton(getString(R.string.tor_open_orbot));
+        View orbotRow = settingAction(getString(R.string.tor_orbot),
+                getString(R.string.tor_orbot_detail), orbot);
+        View.OnClickListener openOrbot = view -> openOrbot();
+        orbot.setOnClickListener(openOrbot);
+        orbotRow.setOnClickListener(openOrbot);
+        content.addView(orbotRow);
+
+        View checkRow = settingAction(getString(R.string.tor_check), state, check);
+        View.OnClickListener checkConnection = view -> {
+            if (!AppNetwork.isTorEnabled() || !check.isEnabled()) {
+                return;
+            }
+            int generation = torSettingsGeneration.incrementAndGet();
+            check.setEnabled(false);
+            check.setText(R.string.tor_checking);
+            state.setText(R.string.tor_checking_detail);
+            torCheckExecutor.execute(() -> {
+                int result;
+                try {
+                    result = AppNetwork.checkTorConnection()
+                            ? R.string.tor_verified : R.string.tor_not_detected;
+                } catch (Exception failure) {
+                    result = R.string.tor_check_failed;
+                }
+                int resultMessage = result;
+                mainHandler.post(() -> {
+                    if (activityUnavailable() || generation != torSettingsGeneration.get()) {
+                        return;
+                    }
+                    state.setText(resultMessage);
+                    check.setText(R.string.check_now);
+                    check.setEnabled(AppNetwork.isTorEnabled());
+                });
+            });
+        };
+        check.setOnClickListener(checkConnection);
+        checkRow.setOnClickListener(checkConnection);
+        content.addView(checkRow);
+
+        Button port = textButton(getString(R.string.tor_change_port));
+        View portRow = settingAction(getString(R.string.tor_port), portDetail, port);
+        View.OnClickListener changePort = view -> showTorPortDialog(render);
+        port.setOnClickListener(changePort);
+        portRow.setOnClickListener(changePort);
+        content.addView(portRow);
+
+        TextView limits = text(getString(R.string.tor_privacy_detail), 12,
+                getColor(R.color.text_secondary));
+        limits.setPadding(0, dp(6), 0, dp(8));
+        content.addView(limits);
+        render.run();
+    }
+
+    private void applyTorSetting(boolean enabled, int port) {
+        if (enabled == AppNetwork.isTorEnabled() && port == AppNetwork.torPort()) {
+            return;
+        }
+        invalidateForNetworkRouteChange();
+        try {
+            AppNetwork.setTorEnabled(enabled, port);
+            Toast.makeText(this, activeOfflineRecord == null
+                    ? R.string.tor_route_changed : R.string.tor_route_changed_offline,
+                    Toast.LENGTH_LONG).show();
+        } catch (RuntimeException failure) {
+            Toast.makeText(this, R.string.tor_setting_failed, Toast.LENGTH_LONG).show();
+            if (activeSettingsDialog != null) {
+                activeSettingsDialog.dismiss();
+                mainHandler.post(this::showSettings);
+            }
+        }
+        rebindOfflineNetworkRoute();
+        observedTorEnabled = AppNetwork.isTorEnabled();
+        observedTorPort = AppNetwork.torPort();
+        refreshOfflineControls();
+        refreshTorBanner();
+    }
+
+    private void synchronizeNetworkRoute() {
+        if (activityUnavailable()) {
+            return;
+        }
+        if (observedTorEnabled != AppNetwork.isTorEnabled()
+                || observedTorPort != AppNetwork.torPort()) {
+            invalidateForNetworkRouteChange();
+            rebindOfflineNetworkRoute();
+            observedTorEnabled = AppNetwork.isTorEnabled();
+            observedTorPort = AppNetwork.torPort();
+            if (activeSettingsDialog != null) {
+                activeSettingsDialog.dismiss();
+            }
+            refreshOfflineControls();
+        }
+        refreshTorBanner();
+    }
+
+    private void invalidateForNetworkRouteChange() {
+        torSettingsGeneration.incrementAndGet();
+        updateDownloadVerificationGeneration.incrementAndGet();
+        // Invalidate resolver callbacks before cancelling sockets so they cannot
+        // restart playback with metadata obtained under the previous route.
+        loadGeneration.incrementAndGet();
+        playlistLoadGeneration.incrementAndGet();
+        cancelTask(activeVideoResolveTask);
+        cancelTask(activePlaylistResolveTask);
+        activeVideoResolveTask = null;
+        activePlaylistResolveTask = null;
+        cancelOfflineDownload();
+        clearPendingOfflineCredential();
+        if (activeOfflineRecord == null) {
+            activeVideo = null;
+            activeUrl = null;
+            sourceUrl = null;
+            playlistQueue = null;
+            playlistCard.setVisibility(View.GONE);
+            selectedMediaPrepared = false;
+            preparedPlaybackGeneration = -1;
+            pendingSeekMs = PlaybackSessionState.NO_PENDING_SEEK;
+            pendingRestoreVideoId = null;
+            pendingRestorePlaylistIndex = -1;
+            playbackSessionState.requestPlayWhenReady(false);
+            player.stop();
+            player.clearMediaItems();
+            loadingIndicator.setVisibility(View.GONE);
+            errorCard.setVisibility(View.GONE);
+            playbackStatus.setText(R.string.tor_route_changed);
+            resetItemProtection();
+        }
+    }
+
+    private void rebindOfflineNetworkRoute() {
+        // A failed preference write also invalidated the old callbacks. Keep an
+        // existing offline session bound to the current generation in either case.
+        if (activeOfflineRecord != null && offlinePlaybackSession != null) {
+            preparedPlaybackGeneration = loadGeneration.get();
+            handledEndGeneration = -1;
+            resetItemProtection();
+            fetchSponsorSegments(activeOfflineRecord.getVideoId(), loadGeneration.get());
+        }
+    }
+
+    private void showTorPortDialog(Runnable render) {
+        EditText input = new EditText(this);
+        input.setInputType(InputType.TYPE_CLASS_NUMBER);
+        input.setSingleLine(true);
+        input.setContentDescription(getString(R.string.tor_port));
+        input.setText(Integer.toString(AppNetwork.torPort()));
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(R.string.tor_port)
+                .setMessage(R.string.tor_port_message)
+                .setView(input)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(R.string.tor_save_port, null)
+                .create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(view -> {
+                    int port;
+                    try {
+                        port = Integer.parseInt(input.getText().toString().trim());
+                        if (port < 1 || port > 65535) {
+                            throw new NumberFormatException();
+                        }
+                    } catch (NumberFormatException invalidPort) {
+                        input.setError(getString(R.string.tor_invalid_port));
+                        return;
+                    }
+                    applyTorSetting(AppNetwork.isTorEnabled(), port);
+                    render.run();
+                    dialog.dismiss();
+                }));
+        dialog.show();
+    }
+
+    private void openOrbot() {
+        Intent launch = getPackageManager().getLaunchIntentForPackage("org.torproject.android");
+        if (launch != null && startExternalActivity(launch)) {
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.tor_get_orbot)
+                .setMessage(R.string.tor_get_orbot_detail)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(R.string.tor_get_orbot, (dialog, which) -> {
+                    if (!openInBrowserDirect("https://orbot.app/en/download/")) {
+                        Toast.makeText(this, R.string.no_app_for_update, Toast.LENGTH_LONG).show();
+                    }
+                })
+                .show();
     }
 
     private void startManualUpdateCheck() {
@@ -2742,6 +3001,14 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void openGitHubIssue(String title, String report) {
+        if (AppNetwork.isTorEnabled()) {
+            confirmExternalTorAction(() -> openGitHubIssueDirect(title, report));
+        } else {
+            openGitHubIssueDirect(title, report);
+        }
+    }
+
+    private void openGitHubIssueDirect(String title, String report) {
         Uri issueUri = Uri.parse(BUG_REPORT_URL)
                 .buildUpon()
                 .appendQueryParameter("title", title)
@@ -2753,7 +3020,7 @@ public final class MainActivity extends ComponentActivity {
                     R.string.long_report_share_fallback,
                     Toast.LENGTH_LONG
             ).show();
-            shareBugReport(title, report);
+            shareBugReportDirect(title, report);
             return;
         }
         Intent openGitHub = new Intent(Intent.ACTION_VIEW, issueUri);
@@ -2764,11 +3031,19 @@ public final class MainActivity extends ComponentActivity {
         try {
             startActivity(chooser);
         } catch (ActivityNotFoundException error) {
-            shareBugReport(title, report);
+            shareBugReportDirect(title, report);
         }
     }
 
     private void shareBugReport(String title, String report) {
+        if (AppNetwork.isTorEnabled()) {
+            confirmExternalTorAction(() -> shareBugReportDirect(title, report));
+        } else {
+            shareBugReportDirect(title, report);
+        }
+    }
+
+    private void shareBugReportDirect(String title, String report) {
         Intent share = new Intent(Intent.ACTION_SEND)
                 .setType("text/plain")
                 .putExtra(Intent.EXTRA_SUBJECT, title)
@@ -3157,6 +3432,27 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private boolean openInBrowser(String url) {
+        if (AppNetwork.isTorEnabled()) {
+            confirmExternalTorAction(() -> {
+                if (!openInBrowserDirect(url)) {
+                    Toast.makeText(this, R.string.no_app_for_update, Toast.LENGTH_LONG).show();
+                }
+            });
+            return true;
+        }
+        return openInBrowserDirect(url);
+    }
+
+    private void confirmExternalTorAction(Runnable action) {
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.tor_external_title)
+                .setMessage(R.string.tor_external_detail)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(R.string.tor_external_continue, (dialog, which) -> action.run())
+                .show();
+    }
+
+    private boolean openInBrowserDirect(String url) {
         Uri uri = Uri.parse(url);
         Intent browserIntent = Intent.makeMainSelectorActivity(
                 Intent.ACTION_MAIN,
@@ -3356,6 +3652,7 @@ public final class MainActivity extends ComponentActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        synchronizeNetworkRoute();
         boolean notificationsAllowed =
                 UpdateNotificationManager.notificationsAllowed(this);
         if (notificationsAllowed && !updateNotificationsWereAllowed) {
@@ -3401,6 +3698,7 @@ public final class MainActivity extends ComponentActivity {
     @Override
     protected void onDestroy() {
         destroyed = true;
+        AppNetwork.removeRouteChangeListener(networkRouteListener);
         revokeOfflineForegroundAccess();
         clearPendingOfflineCredential();
         loadGeneration.incrementAndGet();
@@ -3412,6 +3710,8 @@ public final class MainActivity extends ComponentActivity {
         playlistResolverExecutor.shutdownNow();
         updateCheckExecutor.shutdownNow();
         offlineExecutor.shutdownNow();
+        torCheckExecutor.shutdownNow();
+        torSettingsGeneration.incrementAndGet();
         activeSettingsDialog = null;
         activeUpdateCheckDetail = null;
         activeUpdateCheckAction = null;
@@ -3598,6 +3898,9 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private String humanPlaylistError(Throwable error) {
+        if (AppNetwork.isTorEnabled()) {
+            return getString(R.string.tor_playback_help) + "\n\n" + deepestMessage(error);
+        }
         String message = deepestMessage(error);
         String lower = message.toLowerCase(Locale.US);
         if (lower.contains("no playable")
@@ -3617,6 +3920,9 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private String humanResolveError(Throwable error) {
+        if (AppNetwork.isTorEnabled()) {
+            return getString(R.string.tor_playback_help) + "\n\n" + deepestMessage(error);
+        }
         String message = deepestMessage(error);
         String lower = message.toLowerCase(Locale.US);
         if (lower.contains("age") || lower.contains("sign in")) {
@@ -3634,6 +3940,9 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private String humanPlaybackError(PlaybackException error) {
+        if (AppNetwork.isTorEnabled()) {
+            return getString(R.string.tor_playback_help) + "\n\n" + deepestMessage(error);
+        }
         String detail = deepestMessage(error);
         return getString(R.string.playback_error)
                 + " The stream may have expired or be restricted.\n\n"

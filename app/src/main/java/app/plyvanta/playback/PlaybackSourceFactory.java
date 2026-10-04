@@ -5,8 +5,7 @@ import android.content.Context;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.MediaMetadata;
 import androidx.media3.common.util.UnstableApi;
-import androidx.media3.datasource.DefaultDataSource;
-import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.datasource.okhttp.OkHttpDataSource;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 import androidx.media3.exoplayer.source.MediaSource;
 import androidx.media3.exoplayer.source.MergingMediaSource;
@@ -16,6 +15,7 @@ import java.io.IOException;
 import java.util.Map;
 
 import app.plyvanta.extractor.OkHttpDownloader;
+import app.plyvanta.network.AppNetwork;
 import app.plyvanta.offline.EncryptedChunkFile;
 import app.plyvanta.offline.EncryptedMediaDataSource;
 import app.plyvanta.offline.OfflineMediaRecord;
@@ -26,15 +26,15 @@ public final class PlaybackSourceFactory {
     private final DefaultMediaSourceFactory mediaSourceFactory;
 
     public PlaybackSourceFactory(Context context) {
-        DefaultHttpDataSource.Factory httpFactory = new DefaultHttpDataSource.Factory()
+        OkHttpDataSource.Factory httpFactory = new OkHttpDataSource.Factory(
+                AppNetwork.calls(AppNetwork.Profile.PLAYBACK))
                 .setUserAgent(OkHttpDownloader.DESKTOP_USER_AGENT)
-                .setAllowCrossProtocolRedirects(true)
                 .setDefaultRequestProperties(Map.of(
                         "Accept-Language", "en-US,en;q=0.8"
                 ));
-        DefaultDataSource.Factory dataSourceFactory =
-                new DefaultDataSource.Factory(context, httpFactory);
-        mediaSourceFactory = new DefaultMediaSourceFactory(dataSourceFactory);
+        // Online media, manifests, keys and segments must all use the shared HTTP route.
+        // A DefaultDataSource wrapper could dispatch other schemes (including UDP) outside it.
+        mediaSourceFactory = new DefaultMediaSourceFactory(httpFactory);
     }
 
     public MediaSource create(ResolvedVideo video) {

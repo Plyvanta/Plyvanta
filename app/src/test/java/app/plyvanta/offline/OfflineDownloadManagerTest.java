@@ -28,6 +28,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import app.plyvanta.playback.ResolvedVideo;
+import app.plyvanta.network.AppNetwork;
 import okhttp3.Interceptor;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
@@ -225,11 +226,15 @@ public final class OfflineDownloadManagerTest {
     @Test
     public void productionRedirectBoundaryRejectsHostEscapeAndTlsDowngrade()
             throws Exception {
-        Method buildClient = OfflineDownloadManager.class.getDeclaredMethod(
-                "buildHttpClient"
+        Method buildClient = Class.forName("app.plyvanta.network.NetworkRouter")
+                .getDeclaredMethod(
+                "buildClients", boolean.class, int.class
         );
         buildClient.setAccessible(true);
-        OkHttpClient client = (OkHttpClient) buildClient.invoke(null);
+        @SuppressWarnings("unchecked")
+        Map<AppNetwork.Profile, OkHttpClient> clients =
+                (Map<AppNetwork.Profile, OkHttpClient>) buildClient.invoke(null, false, 9050);
+        OkHttpClient client = clients.get(AppNetwork.Profile.OFFLINE);
 
         assertTrue(client.followRedirects());
         assertFalse(client.followSslRedirects());

@@ -13,10 +13,11 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
-import java.util.concurrent.TimeUnit;
 
+import app.plyvanta.network.AppNetwork;
+
+import okhttp3.Call;
 import okhttp3.HttpUrl;
-import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
 import okhttp3.ResponseBody;
@@ -40,24 +41,20 @@ public final class GitHubReleaseClient {
     private static final String APK_CONTENT_TYPE =
             "application/vnd.android.package-archive";
 
-    private final OkHttpClient httpClient;
+    private final Call.Factory httpClient;
     private final HttpUrl repositoryApiUrl;
     private final HttpUrl releasesApiUrl;
 
     public GitHubReleaseClient() {
         this(
-                new OkHttpClient.Builder()
-                        .connectTimeout(10, TimeUnit.SECONDS)
-                        .readTimeout(20, TimeUnit.SECONDS)
-                        .callTimeout(30, TimeUnit.SECONDS)
-                        .build(),
+                AppNetwork.calls(AppNetwork.Profile.UPDATE),
                 HttpUrl.get(REPOSITORY_API_URL),
                 HttpUrl.get(RELEASES_API_URL)
         );
     }
 
     GitHubReleaseClient(
-            OkHttpClient httpClient,
+            Call.Factory httpClient,
             HttpUrl repositoryApiUrl,
             HttpUrl releasesApiUrl
     ) {

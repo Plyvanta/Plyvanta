@@ -27,10 +27,11 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 import java.util.regex.Pattern;
 
+import app.plyvanta.network.AppNetwork;
+
 import okhttp3.Call;
 import okhttp3.Callback;
 import okhttp3.HttpUrl;
-import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
 import okhttp3.ResponseBody;
@@ -57,7 +58,7 @@ public final class SponsorBlockClient {
     private static final Pattern VIDEO_ID_PATTERN = Pattern.compile("[A-Za-z0-9_-]{11}");
     private static final Pattern CATEGORY_PATTERN = Pattern.compile("[a-z][a-z0-9_]{0,63}");
 
-    private final OkHttpClient httpClient;
+    private final Call.Factory httpClient;
     private final HttpUrl apiBaseUrl;
     private final LongSupplier clock;
     private final long cacheTtlMillis;
@@ -68,7 +69,7 @@ public final class SponsorBlockClient {
 
     public SponsorBlockClient() {
         this(
-                defaultHttpClient(),
+                AppNetwork.calls(AppNetwork.Profile.SPONSOR),
                 HttpUrl.get(DEFAULT_API_BASE_URL),
                 SponsorBlockClient::monotonicTimeMillis,
                 DEFAULT_CACHE_TTL_MILLIS,
@@ -81,7 +82,7 @@ public final class SponsorBlockClient {
      *
      * <p>The URL is treated as a root and {@code api/skipSegments/:hashPrefix} is appended.
      */
-    public SponsorBlockClient(OkHttpClient httpClient, HttpUrl apiBaseUrl) {
+    public SponsorBlockClient(Call.Factory httpClient, HttpUrl apiBaseUrl) {
         this(
                 httpClient,
                 apiBaseUrl,
@@ -92,7 +93,7 @@ public final class SponsorBlockClient {
     }
 
     SponsorBlockClient(
-            OkHttpClient httpClient,
+            Call.Factory httpClient,
             HttpUrl apiBaseUrl,
             LongSupplier clock,
             long cacheTtlMillis,
@@ -486,15 +487,6 @@ public final class SponsorBlockClient {
                 }
             }
         }
-    }
-
-    private static OkHttpClient defaultHttpClient() {
-        return new OkHttpClient.Builder()
-                .connectTimeout(5L, TimeUnit.SECONDS)
-                .readTimeout(8L, TimeUnit.SECONDS)
-                .writeTimeout(5L, TimeUnit.SECONDS)
-                .callTimeout(12L, TimeUnit.SECONDS)
-                .build();
     }
 
     private static long monotonicTimeMillis() {
