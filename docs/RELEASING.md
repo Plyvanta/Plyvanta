@@ -118,14 +118,22 @@ npm run audit:release
 npm run test:release
 ```
 
-The audit gate fails on every unapproved advisory. Semantic Release currently
-installs an unused npm-publishing plugin whose bundled npm CLI contains two
-denial-of-service advisories. Package overrides cannot replace npm's bundled
-files, so the gate narrowly allows those exact paths and advisory IDs only
-while the configured plugin list continues to exclude npm publishing. It will
-fail if their source, severity, path, or reachability changes, or if any new
-advisory appears. Remove the exception as soon as upstream publishes a fixed
-bundle.
+The audit gate fails on every unapproved advisory. The lockfile refresh patches
+the active `js-yaml` and `undici` dependencies. Two constrained exceptions
+remain; neither is a general allowance for high-severity findings:
+
+| Dependency | Why the exception applies |
+| --- | --- |
+| npm 11.21.0's bundled `brace-expansion`, `http-cache-semantics`, `ip-address`, and `undici` | Semantic Release installs the npm-publishing plugin, but the explicit GitHub-only plugin list disables it. Overrides cannot replace bundled files. The audit launches the host npm through `npm_execpath`, rejects a runner inside this repository's `node_modules`, and never launches the disabled bundle through PATH. |
+| `braces` 3.0.3, [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm) | No patched version is available. Its sole consumer is micromatch 4.0.8. The pinned Semantic Release branch matcher and commit analyzer use micromatch APIs that delegate to picomatch, bypassing the vulnerable brace walkers. The regression test replaces every braces API with a throwing sentinel and exercises branch expansion plus deeply nested commit input. |
+
+The gate matches the exact GHSA URLs, severities, ranges, installed paths, and
+locked versions in `scripts/audit-release-tooling.cjs`. GHSA URLs remain stable
+when npm changes numeric advisory IDs. It also checks all dependency consumers,
+the explicit plugin list, the plain `main` branch, and the default analyzer
+rules. New advisories, additional paths or consumers, and changes to these
+conditions fail CI. Remove each exception when upstream ships a fixed bundle
+or parser, then recheck the release callers.
 
 An authenticated dry run analyzes the real tag history without building,
 tagging, or publishing:
