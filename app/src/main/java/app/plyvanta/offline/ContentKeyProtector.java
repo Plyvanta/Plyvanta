@@ -69,19 +69,21 @@ public interface ContentKeyProtector {
      */
     final class Envelope {
         private static final int MAGIC = 0x50564b45; // PVKE
-        private static final int VERSION = 1;
+        public static final int VERSION_AES_GCM = 1;
+        public static final int VERSION_RSA_OAEP = 2;
         private static final int IV_LENGTH = 12;
         private static final int WRAPPED_KEY_LENGTH = 32 + 16;
+        private static final int RSA_WRAPPED_KEY_LENGTH = 256;
         private static final int HEADER_LENGTH =
                 Integer.BYTES + Byte.BYTES + Byte.BYTES + Short.BYTES;
-        private static final int ENCODED_LENGTH =
-                HEADER_LENGTH + IV_LENGTH + WRAPPED_KEY_LENGTH;
-        private static final int MAX_ENCODED_LENGTH = 256;
+        private static final int MAX_ENCODED_LENGTH = HEADER_LENGTH + RSA_WRAPPED_KEY_LENGTH;
 
+        private final int version;
         private final byte[] initializationVector;
         private final byte[] ciphertext;
 
-        private Envelope(byte[] initializationVector, byte[] ciphertext) {
+        private Envelope(int version, byte[] initializationVector, byte[] ciphertext) {
+            this.version = version;
             this.initializationVector = initializationVector.clone();
             this.ciphertext = ciphertext.clone();
         }
@@ -102,14 +104,27 @@ public interface ContentKeyProtector {
                                 + WRAPPED_KEY_LENGTH + " bytes."
                 );
             }
-            return new Envelope(initializationVector, ciphertext);
+            return new Envelope(VERSION_AES_GCM, initializationVector, ciphertext);
+        }
+
+        /**
+         * Fixed-size RSA-2048 OAEP envelope. The encrypted payload binds the item UUID.
+         */
+        public static Envelope createRsa(byte[] ciphertext)
+                throws InvalidEnvelopeException {
+            if (ciphertext == null || ciphertext.length != RSA_WRAPPED_KEY_LENGTH) {
+                throw new InvalidEnvelopeException(
+                        "RSA envelope ciphertext must contain exactly 256 bytes."
+                );
+            }
+            return new Envelope(VERSION_RSA_OAEP, new byte[0], ciphertext);
         }
 
         public static Envelope fromByteArray(byte[] encoded)
                 throws InvalidEnvelopeException {
             if (encoded == null
-                    || encoded.length > MAX_ENCODED_LENGTH
-                    || encoded.length != ENCODED_LENGTH) {
+                    || encoded.length < HEADER_LENGTH
+                    || encoded.length > MAX_ENCODED_LENGTH) {
                 throw new InvalidEnvelopeException(
                         "Envelope has an invalid encoded length."
                 );
@@ -123,15 +138,18 @@ public interface ContentKeyProtector {
                     );
                 }
                 int version = Byte.toUnsignedInt(input.get());
-                if (version != VERSION) {
+                if (version != VERSION_AES_GCM && version != VERSION_RSA_OAEP) {
                     throw new InvalidEnvelopeException(
                             "Envelope version is unsupported."
                     );
                 }
                 int ivLength = Byte.toUnsignedInt(input.get());
                 int ciphertextLength = Short.toUnsignedInt(input.getShort());
-                if (ivLength != IV_LENGTH
-                        || ciphertextLength != WRAPPED_KEY_LENGTH
+                int expectedIvLength = version == VERSION_AES_GCM ? IV_LENGTH : 0;
+                int expectedCiphertextLength = version == VERSION_AES_GCM
+                        ? WRAPPED_KEY_LENGTH : RSA_WRAPPED_KEY_LENGTH;
+                if (ivLength != expectedIvLength
+                        || ciphertextLength != expectedCiphertextLength
                         || input.remaining() != ivLength + ciphertextLength) {
                     throw new InvalidEnvelopeException(
                             "Envelope field lengths are invalid."
@@ -146,7 +164,7 @@ public interface ContentKeyProtector {
                             "Envelope contains trailing data."
                     );
                 }
-                return create(iv, wrapped);
+                return version == VERSION_AES_GCM ? create(iv, wrapped) : createRsa(wrapped);
             } catch (InvalidEnvelopeException exception) {
                 throw exception;
             } catch (RuntimeException exception) {
@@ -158,9 +176,11 @@ public interface ContentKeyProtector {
         }
 
         public byte[] toByteArray() {
-            return ByteBuffer.allocate(ENCODED_LENGTH)
+            return ByteBuffer.allocate(
+                            HEADER_LENGTH + initializationVector.length + ciphertext.length
+                    )
                     .putInt(MAGIC)
-                    .put((byte) VERSION)
+                    .put((byte) version)
                     .put((byte) initializationVector.length)
                     .putShort((short) ciphertext.length)
                     .put(initializationVector)
@@ -176,6 +196,10 @@ public interface ContentKeyProtector {
             return ciphertext.clone();
         }
 
+        public int getVersion() {
+            return version;
+        }
+
         @Override
         public boolean equals(Object candidate) {
             if (this == candidate) {
@@ -185,20 +209,22 @@ public interface ContentKeyProtector {
                 return false;
             }
             Envelope other = (Envelope) candidate;
-            return Arrays.equals(initializationVector, other.initializationVector)
+            return version == other.version
+                    && Arrays.equals(initializationVector, other.initializationVector)
                     && Arrays.equals(ciphertext, other.ciphertext);
         }
 
         @Override
         public int hashCode() {
-            return 31 * Arrays.hashCode(initializationVector)
+            return 31 * (31 * version + Arrays.hashCode(initializationVector))
                     + Arrays.hashCode(ciphertext);
         }
 
         @Override
         public String toString() {
-            return "Envelope{version=" + VERSION
-                    + ", encodedBytes=" + ENCODED_LENGTH + '}';
+            return "Envelope{version=" + version
+                    + ", encodedBytes="
+                    + (HEADER_LENGTH + initializationVector.length + ciphertext.length) + '}';
         }
     }
 }

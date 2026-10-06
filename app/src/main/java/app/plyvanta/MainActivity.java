@@ -62,6 +62,7 @@ import androidx.media3.exoplayer.source.MediaSource;
 import androidx.media3.ui.AspectRatioFrameLayout;
 import androidx.media3.ui.PlayerView;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -96,6 +97,10 @@ import app.plyvanta.settings.PreferenceStore;
 import app.plyvanta.sponsor.SponsorBlockClient;
 import app.plyvanta.sponsor.SponsorSegment;
 import app.plyvanta.support.DiagnosticReport;
+import app.plyvanta.subscription.ChannelSubscription;
+import app.plyvanta.subscription.SubscriptionDownloadScheduler;
+import app.plyvanta.subscription.SubscriptionPanel;
+import app.plyvanta.subscription.SubscriptionStore;
 import app.plyvanta.update.UpdateChecker;
 import app.plyvanta.update.UpdateDownloadVerification;
 import app.plyvanta.update.UpdateNotificationManager;
@@ -200,6 +205,8 @@ public final class MainActivity extends ComponentActivity {
     private OfflineSecurityPolicy offlineSecurityPolicy;
     private OfflineMediaStore offlineMediaStore;
     private OfflineDownloadManager offlineDownloadManager;
+    private SubscriptionStore subscriptionStore;
+    private SubscriptionPanel subscriptionPanel;
     private final NewPipeVideoResolver videoResolver = new NewPipeVideoResolver();
     private final NewPipePlaylistResolver playlistResolver =
             new NewPipePlaylistResolver();
@@ -280,6 +287,7 @@ public final class MainActivity extends ComponentActivity {
                 UpdateNotificationManager.notificationsAllowed(this);
         sponsorBlockClient = new SponsorBlockClient();
         initializeOfflineMedia();
+        initializeSubscriptions();
         buildPlayer();
         setContentView(buildUi());
         applySystemInsets();
@@ -368,6 +376,55 @@ public final class MainActivity extends ComponentActivity {
             offlineDownloadManager = null;
             offlineInitializationFailure = exception.getClass().getSimpleName();
         }
+    }
+
+    private void initializeSubscriptions() {
+        try {
+            subscriptionStore = SubscriptionStore.forApplication(this);
+        } catch (IOException exception) {
+            subscriptionStore = null;
+        }
+        subscriptionPanel = new SubscriptionPanel(this, subscriptionStore,
+                new SubscriptionPanel.Host() {
+                    @Override
+                    public void playVideo(String publicVideoUrl) {
+                        YouTubeUrlParser.PlayableLink link =
+                                YouTubeUrlParser.parsePlayable(publicVideoUrl);
+                        if (link != null) {
+                            linkInput.setText(link.getCanonicalUrl());
+                            startPlayable(link, -1, null, PlaybackStartReason.USER);
+                        }
+                    }
+
+                    @Override
+                    public String offlineRestriction() {
+                        OfflineSecurityPolicy.Decision decision = offlineSecurityDecision();
+                        if (!decision.isAllowed()) {
+                            return decision.getMessage();
+                        }
+                        return offlineMediaStore == null
+                                ? getString(R.string.offline_integrity_error) : null;
+                    }
+
+                    @Override
+                    public void onAutoDownloadPreferencesChanged() {
+                        SubscriptionDownloadScheduler.cancelIfIdle(MainActivity.this);
+                        SubscriptionDownloadScheduler.schedulePending(MainActivity.this);
+                    }
+
+                    @Override
+                    public void requestAutomaticDownloads() {
+                        SubscriptionDownloadScheduler.schedulePending(MainActivity.this);
+                        Toast.makeText(MainActivity.this,
+                                R.string.subscription_downloads_scheduled,
+                                Toast.LENGTH_LONG).show();
+                    }
+
+                    @Override
+                    public void onFeedChanged() {
+                        SubscriptionDownloadScheduler.schedulePending(MainActivity.this);
+                    }
+                });
     }
 
     private void buildPlayer() {
@@ -510,6 +567,7 @@ public final class MainActivity extends ComponentActivity {
         playlistCard = buildPlaylistCard();
         body.addView(playlistCard, spacedCardParams());
         body.addView(buildInputCard(), spacedCardParams());
+        body.addView(subscriptionPanel.buildCard(), spacedCardParams());
         body.addView(buildOfflineCard(), spacedCardParams());
         body.addView(buildProtectionCard(), spacedCardParams());
 
@@ -1482,10 +1540,21 @@ public final class MainActivity extends ComponentActivity {
         offlineExecutor.execute(() -> {
             boolean reset = false;
             try {
-                if (offlineMediaStore != null) {
-                    offlineMediaStore.reset();
-                    reset = true;
-                }
+                SubscriptionDownloadScheduler.runWithDownloadsPaused(this, () -> {
+                    if (subscriptionStore != null) {
+                        synchronized (subscriptionStore) {
+                            for (ChannelSubscription channel : subscriptionStore.getSubscriptions()) {
+                                subscriptionStore.setAutoDownload(channel.getChannelId(), false);
+                            }
+                            if (offlineMediaStore != null) {
+                                offlineMediaStore.reset();
+                            }
+                        }
+                    } else if (offlineMediaStore != null) {
+                        offlineMediaStore.reset();
+                    }
+                });
+                reset = offlineMediaStore != null;
             } catch (Exception ignored) {
                 // The user-facing result is intentionally generic.
             }
@@ -1500,6 +1569,7 @@ public final class MainActivity extends ComponentActivity {
                             Toast.LENGTH_LONG
                     ).show();
                     refreshOfflineControls();
+                    subscriptionPanel.render();
                 }
             });
         });
@@ -3661,6 +3731,7 @@ public final class MainActivity extends ComponentActivity {
         updateNotificationsWereAllowed = notificationsAllowed;
         refreshOfflineControls();
         mainHandler.post(this::performApprovedOfflineActionIfResumed);
+        subscriptionPanel.onResume();
     }
 
     @Override
@@ -3673,6 +3744,7 @@ public final class MainActivity extends ComponentActivity {
 
     @Override
     protected void onPause() {
+        subscriptionPanel.onPause();
         boolean credentialPromptInFlight = awaitingOfflineCredential;
         revokeOfflineForegroundAccess();
         if (!credentialPromptInFlight) {
@@ -3698,6 +3770,7 @@ public final class MainActivity extends ComponentActivity {
     @Override
     protected void onDestroy() {
         destroyed = true;
+        subscriptionPanel.destroy();
         AppNetwork.removeRouteChangeListener(networkRouteListener);
         revokeOfflineForegroundAccess();
         clearPendingOfflineCredential();

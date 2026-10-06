@@ -43,6 +43,121 @@ public final class OfflineMediaStoreTest {
     public final TemporaryFolder temporaryFolder = new TemporaryFolder();
 
     @Test
+    public void committedDownloadProbeWorksAfterRestartWithoutPrivateKeyUnwrap()
+            throws Exception {
+        Path root = newRoot("commit-probe-locked-key");
+        FakeContentKeyProtector protector = new FakeContentKeyProtector();
+        OfflineMediaStore store = new OfflineMediaStore(root, protector);
+        UUID itemId = UUID.randomUUID();
+        commitProgressive(store, itemId, patternedBytes(4_123), "Background item");
+        protector.forbidUnwrap();
+
+        assertTrue(store.hasCommittedDownload(itemId));
+        OfflineMediaStore restarted = new OfflineMediaStore(root, protector);
+        assertTrue(restarted.hasCommittedDownload(itemId));
+        assertEquals(0, protector.unwrapCount());
+        assertThrows(ContentKeyProtector.AuthenticationRequiredException.class,
+                () -> restarted.open(itemId));
+        assertEquals(1, protector.unwrapCount());
+    }
+
+    @Test
+    public void committedDownloadProbeDoesNotRecognizeMissingOrInProgressItems()
+            throws Exception {
+        Path root = newRoot("commit-probe-publication");
+        FakeContentKeyProtector protector = new FakeContentKeyProtector();
+        OfflineMediaStore store = new OfflineMediaStore(root, protector);
+        UUID stableItemId = UUID.fromString("5350cf65-3bb6-4f9b-a38a-73e7c8e232fc");
+        assertFalse(store.hasCommittedDownload(stableItemId));
+        byte[] video = patternedBytes(2_217);
+        byte[] audio = patternedBytes(913);
+        try (OfflineMediaStore.DownloadSession session = store.begin(stableItemId)) {
+            assertFalse(store.hasCommittedDownload(stableItemId));
+            session.writeTrack(EncryptedChunkFile.TrackRole.VIDEO,
+                    new ByteArrayInputStream(video), video.length);
+            session.writeTrack(EncryptedChunkFile.TrackRole.AUDIO,
+                    new ByteArrayInputStream(audio), audio.length);
+            assertFalse(store.hasCommittedDownload(stableItemId));
+            session.commit(mergedRecord(stableItemId, video.length, audio.length));
+        }
+        assertTrue(store.hasCommittedDownload(stableItemId));
+        assertFalse(store.hasCommittedDownload(UUID.randomUUID()));
+        UUID cancelledId = UUID.randomUUID();
+        try (OfflineMediaStore.DownloadSession session = store.begin(cancelledId)) {
+            session.writeTrack(EncryptedChunkFile.TrackRole.PROGRESSIVE,
+                    new ByteArrayInputStream(video), video.length);
+            assertFalse(store.hasCommittedDownload(cancelledId));
+        }
+        assertFalse(store.hasCommittedDownload(cancelledId));
+        assertEquals(0, protector.unwrapCount());
+    }
+
+    @Test
+    public void committedDownloadProbeRejectsMalformedFilesAndIncompleteLayouts()
+            throws Exception {
+        Path root = newRoot("commit-probe-malformed");
+        OfflineMediaStore store = new OfflineMediaStore(root, new FakeContentKeyProtector());
+        UUID itemId = UUID.randomUUID();
+        commitProgressive(store, itemId, patternedBytes(1_251), "Probe bounds");
+        Path directory = root.resolve(itemId.toString());
+        Path key = directory.resolve("key.pvk");
+        byte[] originalEnvelope = Files.readAllBytes(key);
+        Files.write(key, new byte[] {1, 2, 3});
+        assertThrows(IOException.class, () -> store.hasCommittedDownload(itemId));
+        Files.write(key, new byte[265]);
+        assertThrows(IOException.class, () -> store.hasCommittedDownload(itemId));
+        Files.write(key, originalEnvelope);
+        // A v2 RSA envelope is larger than the legacy AES envelope and must fit the bound.
+        Files.write(key, ContentKeyProtector.Envelope.createRsa(new byte[256]).toByteArray());
+        assertTrue(store.hasCommittedDownload(itemId));
+        Files.write(key, originalEnvelope);
+
+        Path record = directory.resolve("record.pvm");
+        byte[] originalRecord = Files.readAllBytes(record);
+        Files.write(record, new byte[0]);
+        assertThrows(IOException.class, () -> store.hasCommittedDownload(itemId));
+        Files.write(record, new byte[16 * 1024 + 1]);
+        assertThrows(IOException.class, () -> store.hasCommittedDownload(itemId));
+        Files.write(record, originalRecord);
+        Path video = directory.resolve("video.pvc");
+        byte[] originalVideo = Files.readAllBytes(video);
+        Files.write(video, new byte[0]);
+        assertThrows(IOException.class, () -> store.hasCommittedDownload(itemId));
+        Files.write(video, originalVideo);
+        Files.write(directory.resolve("unexpected"), new byte[] {1});
+        assertThrows(IOException.class, () -> store.hasCommittedDownload(itemId));
+        Files.delete(directory.resolve("unexpected"));
+        Files.delete(key);
+        assertThrows(IOException.class, () -> store.hasCommittedDownload(itemId));
+    }
+
+    @Test
+    public void committedDownloadProbeRejectsDirectoryAndFileSymlinks()
+            throws Exception {
+        Path root = newRoot("commit-probe-links");
+        OfflineMediaStore store = new OfflineMediaStore(root, new FakeContentKeyProtector());
+        Path outside = temporaryFolder.newFolder("commit-probe-outside").toPath();
+        Path marker = outside.resolve("protected");
+        Files.write(marker, new byte[] {9, 8, 7});
+        UUID linkedId = UUID.randomUUID();
+        Files.createSymbolicLink(root.resolve(linkedId.toString()), outside);
+        assertThrows(IOException.class, () -> store.hasCommittedDownload(linkedId));
+
+        UUID itemId = UUID.randomUUID();
+        commitProgressive(store, itemId, patternedBytes(901), "No external files");
+        Path key = root.resolve(itemId.toString()).resolve("key.pvk");
+        Files.delete(key);
+        Files.createSymbolicLink(key, marker);
+        assertThrows(IOException.class, () -> store.hasCommittedDownload(itemId));
+        assertArrayEquals(new byte[] {9, 8, 7}, Files.readAllBytes(marker));
+        Files.delete(key);
+        Files.createDirectory(key);
+        assertThrows(IOException.class, () -> store.hasCommittedDownload(itemId));
+        assertThrows(IllegalArgumentException.class, () -> store.hasCommittedDownload(
+                UUID.fromString("00000000-0000-0000-0000-000000000001")));
+    }
+
+    @Test
     public void commitIsAtomicEncryptedAtRestAndFailureOrCancelLeavesNoItem()
             throws Exception {
         Path root = newRoot("atomic");
@@ -909,6 +1024,8 @@ public final class OfflineMediaStoreTest {
         private byte[] lastUnwrappedKey;
         private boolean deleted;
         private boolean allowed = true;
+        private boolean unwrapForbidden;
+        private int unwrapCalls;
 
         private FakeContentKeyProtector() {
             random.nextBytes(wrappingKey);
@@ -953,6 +1070,12 @@ public final class OfflineMediaStoreTest {
         @Override
         public synchronized byte[] unwrap(Envelope envelope, String itemId)
                 throws KeyProtectionException {
+            unwrapCalls++;
+            if (unwrapForbidden) {
+                throw new AuthenticationRequiredException(
+                        "The private test wrapping key is locked.", null
+                );
+            }
             requireAvailable();
             byte[] iv = envelope.getInitializationVector();
             byte[] ciphertext = envelope.getCiphertext();
@@ -1008,6 +1131,14 @@ public final class OfflineMediaStoreTest {
 
         private synchronized boolean wasDeleted() {
             return deleted;
+        }
+
+        private synchronized void forbidUnwrap() {
+            unwrapForbidden = true;
+        }
+
+        private synchronized int unwrapCount() {
+            return unwrapCalls;
         }
 
         private synchronized void setAllowed(boolean allowed) {

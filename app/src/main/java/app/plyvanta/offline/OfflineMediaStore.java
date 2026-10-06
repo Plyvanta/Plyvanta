@@ -57,7 +57,7 @@ public final class OfflineMediaStore {
     private static final String RECORD_FILE = "record.pvm";
     private static final String VIDEO_FILE = "video.pvc";
     private static final String AUDIO_FILE = "audio.pvc";
-    private static final int MAX_KEY_FILE_BYTES = 256;
+    private static final int MAX_KEY_FILE_BYTES = 264;
     private static final int MAX_RECORD_FILE_BYTES = 16 * 1024;
 
     private static final Set<String> BASE_ITEM_FILES = Set.of(
@@ -147,6 +147,62 @@ public final class OfflineMediaStore {
     public DownloadSession begin()
             throws IOException, ContentKeyProtector.KeyProtectionException {
         return begin(UUID.randomUUID());
+    }
+
+    /** Returns a device-private, stable identity without opening a saved item. */
+    public synchronized UUID subscriptionDownloadItemId(
+            String channelId, long subscribedAtMs, String videoId
+    ) throws ContentKeyProtector.KeyProtectionException {
+        if (!(keyProtector instanceof DeviceBoundKeyManager)) {
+            throw new ContentKeyProtector.KeyUnavailableException(
+                    "Subscription identities require the device-bound key manager.");
+        }
+        return ((DeviceBoundKeyManager) keyProtector)
+                .subscriptionItemId(channelId, subscribedAtMs, videoId);
+    }
+
+    /**
+     * Recognizes an atomic publication without unwrapping its key or decrypting
+     * metadata. Playback still performs full authentication after device consent.
+     */
+    public synchronized boolean hasCommittedDownload(UUID itemId) throws IOException {
+        ensureRoot();
+        Path directory = finalDirectory(itemId);
+        if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
+            return false;
+        }
+        if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("Offline item directory is invalid.");
+        }
+        Set<String> names = new HashSet<>();
+        try (DirectoryStream<Path> children = Files.newDirectoryStream(directory)) {
+            for (Path child : children) {
+                if (!Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS)) {
+                    throw new IOException("Offline item layout is invalid.");
+                }
+                names.add(child.getFileName().toString());
+            }
+        }
+        if (!names.equals(BASE_ITEM_FILES)
+                && !names.equals(Set.of(KEY_FILE, RECORD_FILE, VIDEO_FILE, AUDIO_FILE))) {
+            throw new IOException("Offline item layout is incomplete.");
+        }
+        byte[] envelope = readBounded(directory.resolve(KEY_FILE), MAX_KEY_FILE_BYTES);
+        try {
+            ContentKeyProtector.Envelope.fromByteArray(envelope);
+        } catch (ContentKeyProtector.InvalidEnvelopeException exception) {
+            throw new IOException("Offline item key envelope is invalid.");
+        } finally {
+            OfflineCrypto.wipe(envelope);
+        }
+        long metadataLength = Files.size(directory.resolve(RECORD_FILE));
+        if (metadataLength <= 0 || metadataLength > MAX_RECORD_FILE_BYTES
+                || Files.size(directory.resolve(VIDEO_FILE)) <= 0
+                || (names.contains(AUDIO_FILE)
+                    && Files.size(directory.resolve(AUDIO_FILE)) <= 0)) {
+            throw new IOException("Offline item file length is invalid.");
+        }
+        return true;
     }
 
     /**

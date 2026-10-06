@@ -236,8 +236,12 @@ must preserve all of the following.
 Any change that creates, reads, plays, lists, or deletes offline media must
 follow the complete [`docs/OFFLINE_SECURITY.md`](docs/OFFLINE_SECURITY.md)
 contract. Offline behavior is deliberately fail-closed: do not add a weaker
-device, key, storage, source-format, background-download, recovery, export,
+device, key, storage, source-format, recovery, export,
 share, cast, or capture fallback when a required protection is unavailable.
+Opted-in channel downloads may encrypt finite media in background work, but
+workers must never unwrap saved keys, decrypt or list saved vault items, or play
+media.
+Foreground device authentication remains mandatory to unlock saved items.
 
 This strictness is intentional official-project policy, not just cryptographic
 hardening. Media extraction and offline copying add copyright and

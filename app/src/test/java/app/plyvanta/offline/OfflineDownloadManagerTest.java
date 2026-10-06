@@ -224,6 +224,80 @@ public final class OfflineDownloadManagerTest {
     }
 
     @Test
+    public void inactiveOperationGuardPreventsRequestsAndKeyCreation() throws Exception {
+        Path root = newRoot("guard-inactive");
+        OfflineMediaStore store = new OfflineMediaStore(root, new TestContentKeyProtector());
+        AtomicReference<Request> capturedRequest = new AtomicReference<>();
+        OfflineDownloadManager.Cancellation cancellation =
+                new OfflineDownloadManager.Cancellation(() -> false);
+
+        assertThrows(OfflineDownloadManager.DownloadCancelledException.class,
+                () -> new OfflineDownloadManager(store, responseClient(
+                        ResponseFixture.complete(new byte[] {1}), capturedRequest
+                )).download(progressiveVideo(), cancellation, (track, downloaded, total) -> { }));
+
+        assertEquals(null, capturedRequest.get());
+        assertTrue(cancellation.isCancelled());
+        assertVaultEmpty(store, root);
+    }
+
+    @Test
+    public void operationGuardChangingDuringStreamingRemovesPartialItem() throws Exception {
+        Path root = newRoot("guard-stream");
+        OfflineMediaStore store = new OfflineMediaStore(root, new TestContentKeyProtector());
+        AtomicBoolean active = new AtomicBoolean(true);
+        OfflineDownloadManager.Cancellation cancellation =
+                new OfflineDownloadManager.Cancellation(active::get);
+        byte[] media = patternedBytes(EncryptedChunkFile.CHUNK_SIZE_BYTES + 111);
+
+        assertThrows(OfflineDownloadManager.DownloadCancelledException.class,
+                () -> new OfflineDownloadManager(store, responseClient(
+                        ResponseFixture.complete(media), new AtomicReference<>()
+                )).download(progressiveVideo(), cancellation, (track, downloaded, total) -> {
+                    if (downloaded > 0L) {
+                        active.set(false);
+                    }
+                }));
+
+        assertTrue(cancellation.isCancelled());
+        assertVaultEmpty(store, root);
+    }
+
+    @Test
+    public void operationGuardChangingAtCommitCannotPublishItem() throws Exception {
+        Path root = newRoot("guard-commit");
+        AtomicBoolean active = new AtomicBoolean(true);
+        OfflineDownloadManager.Cancellation cancellation =
+                new OfflineDownloadManager.Cancellation(active::get);
+        TestContentKeyProtector protector = new TestContentKeyProtector();
+        protector.setStatusHook(() -> active.set(false));
+        OfflineMediaStore store = new OfflineMediaStore(root, protector);
+
+        assertThrows(OfflineDownloadManager.DownloadCancelledException.class,
+                () -> new OfflineDownloadManager(store, responseClient(
+                        ResponseFixture.complete(patternedBytes(77_777)), new AtomicReference<>()
+                )).download(progressiveVideo(), cancellation, (track, downloaded, total) -> { }));
+
+        assertTrue(cancellation.isCancelled());
+        assertVaultEmpty(store, root);
+    }
+
+    @Test
+    public void failedOrThrowingGuardPermanentlyCancelsOperation() {
+        AtomicBoolean active = new AtomicBoolean(false);
+        OfflineDownloadManager.Cancellation cancellation =
+                new OfflineDownloadManager.Cancellation(active::get);
+        assertTrue(cancellation.isCancelled());
+        active.set(true);
+        assertTrue(cancellation.isCancelled());
+
+        OfflineDownloadManager.Cancellation throwing = new OfflineDownloadManager.Cancellation(
+                () -> { throw new IllegalStateException("Guard unavailable"); }
+        );
+        assertTrue(throwing.isCancelled());
+    }
+
+    @Test
     public void productionRedirectBoundaryRejectsHostEscapeAndTlsDowngrade()
             throws Exception {
         Method buildClient = Class.forName("app.plyvanta.network.NetworkRouter")

@@ -25,6 +25,48 @@ public final class ContentKeyProtectorEnvelopeTest {
         assertEquals(expected, decoded);
         assertArrayEquals(iv, decoded.getInitializationVector());
         assertArrayEquals(ciphertext, decoded.getCiphertext());
+        assertEquals(ContentKeyProtector.Envelope.VERSION_AES_GCM, decoded.getVersion());
+    }
+
+    @Test
+    public void rsaEnvelopeIsFixedSizeVersionedAndDefensivelyCopied() throws Exception {
+        byte[] ciphertext = bytes(256, 7);
+        byte[] expectedCiphertext = ciphertext.clone();
+        ContentKeyProtector.Envelope envelope = ContentKeyProtector.Envelope.createRsa(ciphertext);
+        Arrays.fill(ciphertext, (byte) 0);
+        byte[] returnedCiphertext = envelope.getCiphertext();
+        Arrays.fill(returnedCiphertext, (byte) 0);
+
+        assertEquals(264, envelope.toByteArray().length);
+        assertEquals(0, envelope.getInitializationVector().length);
+        assertEquals(ContentKeyProtector.Envelope.VERSION_RSA_OAEP, envelope.getVersion());
+        assertArrayEquals(expectedCiphertext, envelope.getCiphertext());
+        assertEquals(envelope, ContentKeyProtector.Envelope.fromByteArray(envelope.toByteArray()));
+        assertThrows(ContentKeyProtector.InvalidEnvelopeException.class,
+                () -> ContentKeyProtector.Envelope.createRsa(new byte[255]));
+        assertThrows(ContentKeyProtector.InvalidEnvelopeException.class,
+                () -> ContentKeyProtector.Envelope.createRsa(new byte[257]));
+    }
+
+    @Test
+    public void rsaDecoderRejectsTruncationTrailingBytesAndCrossVersionLayouts() throws Exception {
+        byte[] encoded = ContentKeyProtector.Envelope.createRsa(bytes(256, 7)).toByteArray();
+        for (int length = 0; length < encoded.length; length++) {
+            assertRejected(Arrays.copyOf(encoded, length));
+        }
+        assertRejected(Arrays.copyOf(encoded, encoded.length + 1));
+        byte[] wrongVersion = encoded.clone();
+        wrongVersion[4] = ContentKeyProtector.Envelope.VERSION_AES_GCM;
+        assertRejected(wrongVersion);
+        byte[] withIv = encoded.clone();
+        withIv[5] = 12;
+        assertRejected(withIv);
+        byte[] wrongLength = encoded.clone();
+        wrongLength[7] = 1;
+        assertRejected(wrongLength);
+        byte[] unknownVersion = encoded.clone();
+        unknownVersion[4] = 3;
+        assertRejected(unknownVersion);
     }
 
     @Test

@@ -9,6 +9,7 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 
 import app.plyvanta.extractor.OkHttpDownloader;
 import app.plyvanta.network.AppNetwork;
@@ -19,7 +20,8 @@ import okhttp3.Response;
 import okhttp3.ResponseBody;
 
 /**
- * Foreground-only direct-to-ciphertext downloader for finite media tracks.
+ * Direct-to-ciphertext downloader for finite media tracks. Callers enforce their
+ * foreground or opted-in background job lifetime through Cancellation.
  */
 public final class OfflineDownloadManager {
     public enum Track {
@@ -36,6 +38,19 @@ public final class OfflineDownloadManager {
     public static final class Cancellation {
         private final AtomicBoolean cancelled = new AtomicBoolean();
         private final AtomicReference<Call> activeCall = new AtomicReference<>();
+        private final BooleanSupplier operationGuard;
+
+        public Cancellation() {
+            this(() -> true);
+        }
+
+        /**
+         * Binds network work and the final commit to the caller's foreground lifetime.
+         * A failed or throwing guard permanently cancels this operation.
+         */
+        public Cancellation(BooleanSupplier operationGuard) {
+            this.operationGuard = Objects.requireNonNull(operationGuard, "operationGuard");
+        }
 
         public void cancel() {
             cancelled.set(true);
@@ -46,12 +61,23 @@ public final class OfflineDownloadManager {
         }
 
         public boolean isCancelled() {
+            if (!cancelled.get()) {
+                boolean active;
+                try {
+                    active = operationGuard.getAsBoolean();
+                } catch (RuntimeException exception) {
+                    active = false;
+                }
+                if (!active) {
+                    cancel();
+                }
+            }
             return cancelled.get();
         }
 
         private void attach(Call call) {
             activeCall.set(call);
-            if (cancelled.get()) {
+            if (isCancelled()) {
                 call.cancel();
             }
         }
@@ -61,7 +87,7 @@ public final class OfflineDownloadManager {
         }
 
         private void throwIfCancelled() throws DownloadCancelledException {
-            if (cancelled.get() || Thread.currentThread().isInterrupted()) {
+            if (isCancelled() || Thread.currentThread().isInterrupted()) {
                 throw new DownloadCancelledException();
             }
         }
@@ -103,6 +129,19 @@ public final class OfflineDownloadManager {
             Cancellation cancellation,
             ProgressListener listener
     ) throws IOException, ContentKeyProtector.KeyProtectionException {
+        return download(video, UUID.randomUUID(), cancellation, listener);
+    }
+
+    /**
+     * Downloads with a private stable identity so a stopped subscription job can
+     * recognize an already published item without decrypting the offline catalog.
+     */
+    public OfflineMediaRecord download(
+            ResolvedVideo video,
+            UUID itemId,
+            Cancellation cancellation,
+            ProgressListener listener
+    ) throws IOException, ContentKeyProtector.KeyProtectionException {
         Objects.requireNonNull(video, "video");
         Objects.requireNonNull(cancellation, "cancellation");
         Objects.requireNonNull(listener, "listener");
@@ -116,7 +155,7 @@ public final class OfflineDownloadManager {
         }
         cancellation.throwIfCancelled();
 
-        try (OfflineMediaStore.DownloadSession session = store.begin()) {
+        try (OfflineMediaStore.DownloadSession session = store.begin(itemId)) {
             long videoLength;
             long audioLength = 0L;
             if (video.getSourceType() == ResolvedVideo.SourceType.PROGRESSIVE) {
