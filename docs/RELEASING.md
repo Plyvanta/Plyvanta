@@ -124,8 +124,19 @@ remain; neither is a general allowance for high-severity findings:
 
 | Dependency | Why the exception applies |
 | --- | --- |
-| npm 11.21.0's bundled `brace-expansion`, `http-cache-semantics`, `ip-address`, and `undici` | Semantic Release installs the npm-publishing plugin, but the explicit GitHub-only plugin list disables it. Overrides cannot replace bundled files. The audit launches the host npm through `npm_execpath`, rejects a runner inside this repository's `node_modules`, and never launches the disabled bundle through PATH. |
+| npm 11.21.0's bundled `brace-expansion`, `http-cache-semantics`, `ip-address`, `postcss-selector-parser`, and `undici` | Semantic Release installs the npm-publishing plugin, but the explicit GitHub-only plugin list disables it. Overrides cannot replace bundled files. The audit launches the host npm through `npm_execpath`, rejects a runner inside this repository's `node_modules`, and never launches the disabled bundle through PATH. |
 | `braces` 3.0.3, [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm) | No patched version is available. Its sole consumer is micromatch 4.0.8. The pinned Semantic Release branch matcher and commit analyzer use micromatch APIs that delegate to picomatch, bypassing the vulnerable brace walkers. The regression test replaces every braces API with a throwing sentinel and exercises branch expansion plus deeply nested commit input. |
+
+The bundled `postcss-selector-parser` 7.1.4 exception covers only
+[GHSA-rj75-hqrm-r3gf](https://github.com/advisories/GHSA-rj75-hqrm-r3gf), with
+moderate severity and the `<7.1.6` range. Version 7.1.6 fixes the parser, but
+the current npm 11.21.0 and 12.2.0 distributions still bundle 7.1.4. Its only
+consumer is the disabled bundle's `@npmcli/query` 5.0.0; the gate checks that
+consumer's exact version and bundled status and rejects every new parser
+consumer. A runtime regression loads the configured Semantic Release plugins
+while blocking imports of the npm plugin, its bundle, and selector parsing;
+enabling npm publishing in a control case must trigger that block. Remove
+this exception when a patched npm bundle is available.
 
 The gate matches the exact GHSA URLs, severities, ranges, installed paths, and
 locked versions in `scripts/audit-release-tooling.cjs`. GHSA URLs remain stable
