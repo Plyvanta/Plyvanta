@@ -8,7 +8,7 @@ const npmNode = "node_modules/@semantic-release/npm/node_modules/npm";
 const npmBundle = npmNode + "/node_modules/";
 const bracesAdvisory = "https://github.com/advisories/GHSA-vfj7-8cjw-p6xm";
 
-// npm's publishing plugin is disabled. Its CLI still bundles the four packages
+// npm's publishing plugin is disabled. Its CLI still bundles the five packages
 // below, which overrides cannot replace. Match stable GHSA URLs rather than
 // npm's mutable numeric advisory IDs, and reject every other finding.
 const allowedAdvisories = new Map([
@@ -29,6 +29,8 @@ const allowedAdvisories = new Map([
     ["ip-address", "moderate", npmBundle + "ip-address", "<=10.7.0"]],
   ["https://github.com/advisories/GHSA-h3mg-xc3c-68pw",
     ["ip-address", "moderate", npmBundle + "ip-address", "<=10.7.0"]],
+  ["https://github.com/advisories/GHSA-rj75-hqrm-r3gf",
+    ["postcss-selector-parser", "moderate", npmBundle + "postcss-selector-parser", "<7.1.6"]],
   ["https://github.com/advisories/GHSA-3wwx-pv8p-q78v",
     ["undici", "moderate", npmBundle + "undici", ">=6.25.0 <6.28.1"]],
   ["https://github.com/advisories/GHSA-r53p-7pc4-xj5r",
@@ -52,6 +54,7 @@ const auditedPackages = new Map([
   ["brace-expansion", ["high", "5.0.9", npmBundle + "brace-expansion"]],
   ["http-cache-semantics", ["high", "4.2.0", npmBundle + "http-cache-semantics"]],
   ["ip-address", ["moderate", "10.5.0", npmBundle + "ip-address"]],
+  ["postcss-selector-parser", ["moderate", "7.1.4", npmBundle + "postcss-selector-parser"]],
   ["undici", ["high", "6.28.0", npmBundle + "undici"]],
 ]);
 
@@ -86,6 +89,12 @@ function validateAuditReport(report, lockfile, releaseConfig) {
   }, "Reassess advisory reachability for custom analyzer rules.");
   assert.deepEqual(consumers(lockfile, "npm"), ["node_modules/@semantic-release/npm"]);
   assert.equal(lockfile.packages[npmNode].version, "11.21.0");
+  // The selector parser is used only by npm's bundled query helper. Reject
+  // new consumers even if npm audit still reports only the bundled path.
+  const queryNode = npmBundle + "@npmcli/query";
+  assert.deepEqual(consumers(lockfile, "postcss-selector-parser"), [queryNode]);
+  assert.equal(lockfile.packages[queryNode].version, "5.0.0", "Reassess the npm query helper.");
+  assert.equal(lockfile.packages[queryNode].inBundle, true, "The npm query helper must stay bundled.");
   assert.deepEqual(consumers(lockfile, "braces"), ["node_modules/micromatch"]);
   assert.deepEqual(consumers(lockfile, "micromatch"), [
     "node_modules/@semantic-release/commit-analyzer", "node_modules/semantic-release",

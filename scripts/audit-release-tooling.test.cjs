@@ -16,6 +16,8 @@ const auditScript = path.join(__dirname, "audit-release-tooling.cjs");
 const bundledNpm = path.join(repositoryRoot,
   "node_modules/@semantic-release/npm/node_modules/npm/bin/npm-cli.js");
 const undiciNode = "node_modules/@semantic-release/npm/node_modules/npm/node_modules/undici";
+const selectorParserNode = "node_modules/@semantic-release/npm/node_modules/npm/node_modules/postcss-selector-parser";
+const queryNode = "node_modules/@semantic-release/npm/node_modules/npm/node_modules/@npmcli/query";
 
 function vulnerability(name, via, node = "node_modules/" + name) {
   return { name, severity: "high", nodes: [node], via, range: "*" };
@@ -61,6 +63,18 @@ function undiciReport() {
   });
 }
 
+function selectorParserReport() {
+  const finding = vulnerability("postcss-selector-parser", [{
+    source: 1241232,
+    name: "postcss-selector-parser",
+    severity: "moderate",
+    url: "https://github.com/advisories/GHSA-rj75-hqrm-r3gf",
+    range: "<7.1.6",
+  }], selectorParserNode);
+  finding.severity = "moderate";
+  return reportFor({ "postcss-selector-parser": finding });
+}
+
 function validate(report, lockfile = structuredClone(baseLockfile),
   config = structuredClone(baseReleaseConfig)) {
   return validateAuditReport(report, lockfile, config);
@@ -79,6 +93,25 @@ test("advisory identity survives an npm numeric source ID change", () => {
 test("accepts an exact advisory only in the disabled npm bundle", () => {
   assert.match(validate(undiciReport()), /exact advisories/);
 });
+
+test("accepts the exact selector parser advisory only in the disabled npm bundle", () => {
+  assert.match(validate(selectorParserReport()), /exact advisories/);
+});
+
+test("rejects vulnerable selector parsing in an active dependency path", () => {
+  const report = selectorParserReport();
+  report.vulnerabilities["postcss-selector-parser"].nodes = ["node_modules/postcss-selector-parser"];
+  assert.throws(() => validate(report), /postcss-selector-parser/);
+});
+
+for (const [field, value] of [["severity", "high"], ["range", "<7.1.7"],
+  ["url", "https://github.com/advisories/GHSA-new1-new2-new3"]]) {
+  test("rejects a changed selector parser advisory " + field, () => {
+    const report = selectorParserReport();
+    report.vulnerabilities["postcss-selector-parser"].via[0][field] = value;
+    assert.throws(() => validate(report), /Changed advisory|Unapproved npm advisory/);
+  });
+}
 
 test("rejects a newly reported GHSA", () => {
   const report = bracesReport();
@@ -128,19 +161,30 @@ for (const name of ["braces", "micromatch", "semantic-release", "@semantic-relea
   });
 }
 
-test("rejects a changed bundled dependency version", () => {
-  const lockfile = structuredClone(baseLockfile);
-  lockfile.packages[undiciNode].version = "6.27.0";
-  assert.throws(() => validate(undiciReport(), lockfile), /undici/);
-});
+for (const [name, node, report] of [["undici", undiciNode, undiciReport],
+  ["postcss-selector-parser", selectorParserNode, selectorParserReport]]) {
+  test("rejects a changed bundled " + name + " version", () => {
+    const lockfile = structuredClone(baseLockfile);
+    lockfile.packages[node].version = "0.0.0";
+    assert.throws(() => validate(report(), lockfile), new RegExp(name));
+  });
 
-test("rejects a formerly bundled finding moved to a normal dependency", () => {
-  const lockfile = structuredClone(baseLockfile);
-  lockfile.packages[undiciNode].inBundle = false;
-  assert.throws(() => validate(undiciReport(), lockfile), /undici/);
-});
+  test("rejects a formerly bundled " + name + " finding moved to a normal dependency", () => {
+    const lockfile = structuredClone(baseLockfile);
+    lockfile.packages[node].inBundle = false;
+    assert.throws(() => validate(report(), lockfile), new RegExp(name));
+  });
+}
 
-for (const dependency of ["micromatch", "braces", "npm"]) {
+for (const [field, value] of [["version", "0.0.0"], ["inBundle", false]]) {
+  test("rejects a changed npm query helper " + field, () => {
+    const lockfile = structuredClone(baseLockfile);
+    lockfile.packages[queryNode][field] = value;
+    assert.throws(() => validate(selectorParserReport(), lockfile), /npm query helper/);
+  });
+}
+
+for (const dependency of ["micromatch", "braces", "npm", "postcss-selector-parser"]) {
   for (const field of ["dependencies", "optionalDependencies", "devDependencies", "peerDependencies"]) {
     test("rejects a new " + dependency + " consumer through " + field, () => {
       const lockfile = structuredClone(baseLockfile);
