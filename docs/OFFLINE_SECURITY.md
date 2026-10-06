@@ -40,7 +40,8 @@ The protected assets are:
 
 - plaintext media bytes;
 - direct, expiring media URLs;
-- per-item content-encryption keys and the Android Keystore wrapping key;
+- per-item content-encryption keys, Android Keystore wrapping keys, and the
+  separate private download-identity key;
 - filesystem locations and internal identifiers that could be used to locate
   protected files; and
 - authenticated metadata needed to interpret encrypted media.
@@ -52,7 +53,28 @@ explain the project's personal-use and anti-redistribution policy, identify the
 copyright and platform-terms risk, acknowledge that forks can remove the
 controls while official builds retain them, and require an explicit,
 unambiguous acknowledgement. That acknowledgement does not grant or verify any
-right.
+right. Enabling automatic downloads must require this acknowledgement separately
+for each channel, covering its future eligible uploads; subscribing by itself
+must not enable downloading.
+
+## Background-download contract revision
+
+The channel-subscription feature revises the former foreground-only download
+rule in response to the user's explicit requirement that opted-in downloads
+continue while Plyvanta is closed. It permits encryption-only background work
+while preserving authenticated, foreground-only access to saved media. New
+items use public-key wrapping so creating ciphertext does not require permission
+to decrypt existing items. Public encryption cannot turn copied ciphertext into
+playable media on another device. The production-device gates, private storage,
+capture defenses, anti-export controls, and rights acknowledgement remain
+mandatory.
+
+This revision does not claim that background code is immune to compromise:
+the resolver and downloader still handle new plaintext bytes and a transient
+per-item key in process memory. They must stream directly into ciphertext and
+clear transient material promptly. They may never access saved-item plaintext
+or use authenticated private-key operations. Manual saves retain their existing
+foreground cancellation behavior.
 
 ## Eligibility must fail closed
 
@@ -79,8 +101,13 @@ unexpected property, failed probe, or invalidated key makes offline media
 unavailable; the implementation must not retry with a weaker key.
 
 The eligibility decision must be rechecked at every operation that creates or
-unwraps a key and whenever a download or playback session crosses a lifecycle
-boundary. Existing downloads remain unavailable when the gate fails. An error
+wraps or unwraps a key, before committing a download, and whenever a download
+or playback session crosses its lifecycle boundary. Public-key wrapping must
+verify the corresponding StrongBox private key's properties even though it
+does not use that private key. Unwrapping, vault listing, and offline playback
+additionally require current device authentication and the protected visible
+app lifecycle. Existing downloads remain unavailable when the gate fails. An
+error
 message may explain which requirement failed, but must not disclose internal
 paths, keys, URLs, or detailed integrity probes.
 
@@ -101,12 +128,17 @@ Persistent storage may contain only:
 - the authenticated, StrongBox-wrapped per-item key envelope; and
 - bounded metadata that is necessary to list and validate an offline item.
 
-Plaintext media, direct media URLs, raw or encoded keys, filesystem paths, and
-download request headers must never be written to metadata, preferences,
+Separate subscription state may retain bounded public channel/video metadata,
+subscription cutoffs, opt-in choices, and download completion state in private,
+backup-excluded storage. It must not contain plaintext vault metadata, media
+URLs, keys, or protected file paths, and is not authority to decrypt an item.
+
+Plaintext media, direct media URLs, raw or encoded secret keys, filesystem paths,
+and download request headers must never be written to metadata, preferences,
 databases, saved-instance state, work requests, notifications, logs,
 diagnostics, crash reports, or bug reports. A direct URL may exist transiently
-in memory only while the foreground resolver/downloader is making the
-corresponding HTTPS request.
+in memory only while the foreground or opted-in background resolver/downloader
+is making the corresponding HTTPS request.
 
 There must be no offline-media integration with:
 
@@ -124,11 +156,36 @@ the offline storage and Media3 data-source boundary.
 
 Each offline item receives an independent 32-byte content-encryption key from a
 cryptographically secure random generator. The raw content key must never be
-persisted. It is wrapped with an Android Keystore AES-256-GCM key that is
-StrongBox-backed, non-exportable, randomized, and subject to device
-authentication. The canonical random item UUID must be authenticated when the
-content key is wrapped and unwrapped so envelopes cannot be moved between
-items.
+persisted. Key envelopes are versioned and bounded:
+
+- New version-2 envelopes use RSA-2048 OAEP with SHA-256 and MGF1-SHA-1. The
+  fixed payload contains the content key and canonical item UUID. Public
+  encryption uses the verified key pair's certificate; the non-exportable
+  Android Keystore private key is StrongBox-backed and requires device
+  credentials within a 30-second authentication window for decryption. Its
+  allowed purpose is decryption only. Verification must check its size,
+  digest, padding, generated origin, authentication policy, and hardware
+  security level before public wrapping or private unwrapping.
+- Legacy version-1 AES-256-GCM envelopes remain readable with their original
+  StrongBox-backed, non-exportable, device-authenticated wrapping key and
+  canonical item UUID as authenticated associated data. Legacy compatibility
+  must not introduce a background private-key operation or weaker fallback.
+
+RSA public wrapping does not require device authentication; all private
+unwrapping does. After RSA decryption, the payload's UUID and exact key length
+must be validated before exposing the content key. Unknown versions, malformed
+lengths, changed ciphertext, wrong UUIDs, missing keys, and unexpected key
+properties fail closed. Envelopes cannot be moved between items or devices.
+
+Background-download identities use a distinct non-exportable, StrongBox-backed
+256-bit HMAC-SHA-256 key with signing purpose and no authentication requirement.
+Domain-separated input includes the channel, subscription cutoff, and video ID;
+the result forms an opaque canonical item UUID. This permits duplicate
+prevention when a process stops after committing media but before recording its
+completion, without exposing source-derived filenames through a public hash.
+The identity key cannot unwrap a content key or decrypt media. Its algorithm,
+size, purpose, generated origin, authentication policy, and StrongBox properties
+must be verified; no weaker or public-hash fallback is allowed.
 
 Track data must use independently authenticated 256 KiB plaintext chunks with
 AES-256-GCM and a 128-bit authentication tag. Every chunk must use a unique
@@ -150,13 +207,40 @@ with attacker-controlled file contents or secret-bearing parameters.
 
 ## Download lifecycle and accepted sources
 
-Downloads are foreground-only operations owned by a visible app lifecycle.
-They must not be delegated to a persistent worker, background service, system
-download manager, or job that can continue after the user leaves the
-foreground flow.
+Manual downloads are foreground-only operations owned by a visible app
+lifecycle. Leaving that lifecycle must cancel the request and partial item.
 
-When the activity loses the foreground, the device becomes ineligible, the
-user cancels, the source changes, or any network, storage, validation, or
+Explicitly opted-in channel downloads may run as network-constrained
+WorkManager work after the app closes. Feed refresh is scheduled about every
+30 minutes; Android scheduling, battery, connectivity, and foreground-service
+limits make this best effort. A long-running download worker must use a
+`dataSync` foreground service with an ongoing progress notification and a
+cancel action. It may resolve a new finite public video, generate a new item
+key, wrap it with the verified public key, and encrypt the incoming stream
+directly into the private vault. It must not unwrap a saved key, decrypt an
+existing item, list the authenticated vault, play media, or use a system
+download manager or shared-file temporary cache. Notifications may show download
+status and progress, never media URLs, secret keys, internal paths, or decrypted
+vault metadata.
+
+Before publication, the store may authenticate the new staging item's chunks
+with that download session's retained content key. This validates the current
+write only; it does not permit worker unwrapping or access to any previously
+saved item. Duplicate detection may check an opaque committed identity without
+unwrapping its envelope or decrypting metadata or media; bounded checks of the
+encrypted item's layout, envelope header, and file lengths are permitted.
+
+The worker must recheck opt-in and eligibility before starting each item and at
+commit. Disabling auto-download, unsubscribing, cancellation by the user or OS,
+vault deletion/reset, source invalidation, device ineligibility, and network
+route failure must stop the affected operation. All worker traffic must use
+the shared network routing policy; Tor failure must never permit a direct
+fallback. Separate activity and worker callers must use the process-wide store
+and its active-session coordination.
+
+When a manual download loses the foreground, a background worker is stopped or
+loses its opt-in, the device becomes ineligible, the user cancels, the source
+changes, or any network, storage, validation, or
 cryptographic step fails, the implementation must:
 
 1. cancel network and encryption work;
@@ -201,10 +285,14 @@ then remove its ciphertext files. With the wrapped per-item key gone, remaining
 ciphertext is treated as cryptographically erased even if flash storage delays
 physical block reuse.
 
-An erase-all operation must delete the Android Keystore wrapping key before
-removing item records and ciphertext. Key invalidation, a missing envelope,
-authentication failure, or an orphaned/corrupt file is not recoverable; clean up
-the unusable files without creating an export or weaker recovery path.
+An erase-all operation must stop active workers and delete all three Android
+Keystore aliases: the legacy AES wrapping key, new RSA decryption key, and
+separate HMAC identity key. Key deletion must precede removing item records and
+ciphertext. Key invalidation, a missing envelope, failed envelope authentication,
+or an orphaned/corrupt file is not recoverable; clean up the unusable files
+without creating an export or weaker recovery path. An expired device-credential
+window requires foreground reauthentication; it must not be treated as permission
+to bypass authentication or as proof that an item is corrupt.
 
 Deletion cannot revoke plaintext that an attacker already captured from
 process memory or an output device. Do not describe filesystem deletion as
@@ -218,8 +306,10 @@ A change violates this contract if it:
   partial, persistent direct URL, raw key, or exported path;
 - permits a non-StrongBox, non-authenticated, debuggable, rooted-indicator,
   test-key, debugger-attached, or otherwise ineligible fallback;
-- permits background downloading or leaves partial artifacts after
-  cancellation or failure;
+- permits background unwrapping, saved-vault decryption/listing, playback, or
+  downloading without explicit per-channel opt-in and rights acknowledgement;
+- leaves partial artifacts after cancellation or failure, or writes background
+  media through a plaintext temporary file or shared download manager;
 - exposes offline media through a provider, share target, export action,
   storage picker, cast route, or other inter-app interface;
 - decrypts more data than playback currently requires or returns bytes before
@@ -243,13 +333,24 @@ cover:
 - every eligibility rejection and precedence when several checks fail;
 - StrongBox unavailability, property mismatch, authentication requirement, and
   key invalidation on real supported devices;
+- RSA public wrapping without authentication and rejection of private
+  unwrapping without current device authentication;
+- version-1 compatibility, version-2 fixed envelope bounds, altered RSA
+  ciphertext, wrong UUIDs, and unexpected RSA key properties;
+- private HMAC identity properties, domain separation, stable duplicate
+  detection across process interruptions, and rejection of weaker key or
+  public-hash fallbacks;
+- worker opt-in, cancellation, disable/unsubscribe, route failure, OS stop,
+  ineligibility, reset, and commit races, with no background saved-item unwrap,
+  listing, decryption, or playback;
 - unique per-item keys and unique chunk nonces;
 - wrong-key, wrong-item, reordered, duplicated, truncated, extended, malformed,
   and corrupted ciphertext;
 - bounded random access across chunk boundaries without a plaintext file;
 - cancellation and cleanup at every download stage;
 - rejection of live, HLS, DASH, and unbounded inputs;
-- deletion of one item and cryptographic erasure of all items;
+- deletion of one item and cryptographic erasure of all items, including all three
+  key aliases and coordination across activities and workers;
 - the merged-manifest absence of storage/export providers and the retention of
   backup, overlay, and audio-capture restrictions; and
 - screenshot, recents, overlay, screen-sharing, audio-capture, lifecycle, and
@@ -261,6 +362,43 @@ cover:
 Release verification must confirm that the production APK is not debuggable.
 Tests demonstrate intended behavior but do not prove that an Android device or
 OEM implementation is uncompromised.
+
+### Production-device verification
+
+JVM tests cannot establish Android Keystore or foreground-service behavior.
+Before release, use an eligible production-signed build on a physical device
+with a secure lock and StrongBox, and content you are permitted to save:
+
+- Confirm that new RSA and HMAC keys are accepted only with the required
+  StrongBox properties; exercise a device where generation is unsupported and
+  confirm that automatic saving remains disabled without a weaker fallback.
+- Subscribe with automatic saving off and verify the post-subscription cutoff
+  and newest-first feed. Enable saving through the complete per-channel rights
+  acknowledgement, leave Plyvanta, and lock the screen while a finite upload
+  downloads. Confirm progress/cancel visibility and Android 13+ notification
+  permission behavior.
+- Reopen **Downloads** and confirm that listing and playback require the device
+  credential. Verify a new version-2 item and an existing version-1 item after
+  upgrading; cancel authentication and let its window expire to check that
+  neither path unlocks saved media without fresh authentication.
+- Cancel the worker, disable automatic saving, unsubscribe, interrupt
+  connectivity, and stop Orbot during a download. Confirm that incomplete items
+  do not appear in the authenticated library and that Tor requests never fall
+  back to direct connections. Exercise process interruption and verify that a
+  completed upload is not copied twice when work resumes.
+- Reset the vault during a background save, including with multiple app
+  windows. Confirm active work stops before erasure, automatic choices turn
+  off, saved items become unavailable, and a later explicit opt-in starts with
+  new device keys.
+- Verify foreground-only manual cancellation and offline playback, secure
+  surfaces, screenshot/recents/overlay/audio-capture restrictions, and the
+  absence of share, export, cast, backup, and migration paths on the supported
+  Android versions.
+
+Record device model, Android API, exact production artifact, and observed
+results. An emulator or debug build cannot substitute for a successful
+StrongBox-backed production download. This checklist specifies required checks;
+it is not evidence that they have been performed.
 
 ## Known limitations and accepted risk
 

@@ -38,6 +38,8 @@ notifications.
 - Accepts a YouTube video or public-playlist URL pasted into the app.
 - Opens links shared from another Android app, including YouTube.
 - Handles supported YouTube links opened through Android's link chooser.
+- Subscribes to public YouTube channels inside Plyvanta and shows their new
+  uploads in a newest-first feed, with optional automatic offline saving.
 - Preserves playlist order, starts at a shared video occurrence, advances
   automatically, and provides **Previous** and **Next** controls.
 - Plays progressive, separate audio/video, HLS, or DASH media with AndroidX
@@ -78,6 +80,33 @@ media stream, and loads the available SponsorBlock segments independently. When
 an enabled segment is reached, playback seeks to its end and briefly offers
 **Undo**.
 
+### Channel subscriptions
+
+Open **Subscriptions → Add channel**, enter a public YouTube channel link or
+`@handle`, and tap **Subscribe**.
+Subscriptions belong to Plyvanta and do not change your YouTube account.
+The feed starts with videos published after you subscribe; older uploads are
+not added. New videos from all your subscribed channels appear newest first.
+Refresh the feed to check immediately. Plyvanta also checks about every
+30 minutes while a network is available, although Android can delay background
+checks.
+
+YouTube's public channel feed contains only its latest 15 uploads. A channel
+that publishes more than that between successful checks can have videos missing
+from Plyvanta's feed, especially after a long time offline or away from the app.
+
+Under **Channels**, you can enable **Automatically download new uploads**
+separately for each channel. Enabling it requires acknowledgement that you have
+permission to save that channel's
+content for personal offline viewing. Automatic saving uses the same protected
+offline library and device requirements described below and can continue while
+Plyvanta is closed. Android shows an ongoing download notification with progress
+and a cancel action; Android 13 and later require notification permission for
+it to appear in the notification drawer. Download timing depends on connectivity
+and Android's background-work limits. Turn the option off or unsubscribe to stop that
+channel's automatic saving. Live, upcoming, HLS, DASH, and other unsupported
+sources are not saved.
+
 ### Tor routing with Orbot
 
 Install [Orbot](https://orbot.app/en/download/), start it, and wait for it to
@@ -89,9 +118,10 @@ can be changed to match its configuration. Orbot VPN mode is optional; in curren
 Orbot versions, **General → Power User Mode** allows using its proxy without
 turning on the device VPN. Orbot may request its background-service permissions.
 
-Tor routing covers video and playlist lookups, media playback (including HLS
-and DASH manifests and segments), SponsorBlock, offline media downloads, and
-foreground/background update checks. Destination hostnames are resolved through
+Tor routing covers video, playlist, and channel lookups, subscription-feed
+refreshes, media playback (including HLS and DASH manifests and segments),
+SponsorBlock, manual and background offline downloads, and foreground/background
+update checks. Destination hostnames are resolved through
 the SOCKS proxy. When Tor is enabled, Plyvanta connects only through Orbot on
 `127.0.0.1`; if the proxy stops, requests fail with no direct fallback. Changing
 the route cancels existing requests and stops online playback; tap **Play** to
@@ -140,8 +170,11 @@ controls make any particular download lawful.
 While a technically eligible finite video is loaded, tap **Save offline**,
 affirm that the platform's terms and applicable law permit you to download that
 content, and confirm the device credential.
-Keep Plyvanta in the foreground until encryption finishes; leaving the app
-cancels the network request and removes the incomplete item. Tap **Downloads**
+For this manual save, keep Plyvanta in the foreground until encryption finishes;
+leaving the app cancels it and removes the incomplete item. Channel
+automatic downloads can save eligible new uploads in the background after you
+enable it and acknowledge the rights policy. Background saving only encrypts
+new media; it cannot unlock or play the offline library. Tap **Downloads**
 and confirm the device credential again to list or play saved items. The
 library offers only playback and deletion—there is no app-provided
 playable-file access, share, save-as, cast, backup, migration, or recovery
@@ -195,14 +228,14 @@ previews cannot be confused. It also writes the release metadata that future
 installed versions require before trusting an update:
 
 ```text
-app/build/outputs/preview/Plyvanta-1.3.0-debug.4.apk
-app/build/outputs/preview/Plyvanta-1.3.0-debug.4-update.json
+app/build/outputs/preview/Plyvanta-1.5.0-debug.4.apk
+app/build/outputs/preview/Plyvanta-1.5.0-debug.4-update.json
 ```
 
 Install it on a connected device or emulator with:
 
 ```sh
-adb install -r app/build/outputs/preview/Plyvanta-1.3.0-debug.4.apk
+adb install -r app/build/outputs/preview/Plyvanta-1.5.0-debug.4.apk
 ```
 
 With one emulator or device connected, verify the exact packaged artifact before
@@ -210,8 +243,8 @@ distribution:
 
 ```sh
 scripts/smoke-test-apk.sh \
-  app/build/outputs/preview/Plyvanta-1.3.0-debug.4.apk \
-  app/build/outputs/preview/Plyvanta-1.3.0-debug.4-update.json \
+  app/build/outputs/preview/Plyvanta-1.5.0-debug.4.apk \
+  app/build/outputs/preview/Plyvanta-1.5.0-debug.4-update.json \
   f316b684e87b4df6deb4c9fc987e530e7c3fae9810e6a3371b0cc0ea05f179f1
 ```
 
@@ -265,8 +298,8 @@ The task refuses a partially configured signing identity and writes the three
 upload-ready assets to:
 
 ```text
-app/build/outputs/stable/Plyvanta-1.3.0.apk
-app/build/outputs/stable/Plyvanta-1.3.0-update.json
+app/build/outputs/stable/Plyvanta-1.5.0.apk
+app/build/outputs/stable/Plyvanta-1.5.0-update.json
 app/build/outputs/stable/SHA256SUMS
 ```
 
@@ -274,8 +307,8 @@ Before distribution, install and exercise the exact packaged artifact:
 
 ```sh
 scripts/smoke-test-apk.sh \
-  app/build/outputs/stable/Plyvanta-1.3.0.apk \
-  app/build/outputs/stable/Plyvanta-1.3.0-update.json \
+  app/build/outputs/stable/Plyvanta-1.5.0.apk \
+  app/build/outputs/stable/Plyvanta-1.5.0-update.json \
   2085e2b0c5bbd6273203f2aa0064b0f6f291a43746f9989dd0cea30e6cec4d8e
 ```
 
@@ -323,8 +356,13 @@ Plyvanta is a single-activity Java Android app:
   uses one process-wide store so multi-window instances cannot bypass active
   download, playback, reset, or cleanup coordination.
 - `DeviceBoundKeyManager` wraps each random item key with a StrongBox-only,
-  device-authenticated Android Keystore key; `OfflineSecurityPolicy` disables
-  the feature when its fail-closed device and build requirements are not met.
+  device-bound Android Keystore key. New RSA envelopes allow encryption-only
+  background saving; private-key decryption still requires device
+  authentication, and legacy AES envelopes remain readable.
+  A separate StrongBox HMAC key produces private download identities for
+  duplicate prevention and cannot decrypt media.
+  `OfflineSecurityPolicy` disables the feature when its fail-closed device and
+  build requirements are not met.
 - `PlaybackProtection` installs secure-window, secure-surface, overlay, recents,
   screen-sharing, and audio-capture defenses before protected playback.
 - `SponsorBlockClient` hashes the video ID, performs a K-anonymous hash-prefix
@@ -365,6 +403,15 @@ change; they are not presented as history. The playlist queue otherwise remains
 in memory and contains only public page metadata, never direct media URLs.
 Android cloud backup and device-to-device transfer are disabled for Plyvanta's
 app data.
+
+Channel subscriptions, their start dates and auto-download choices, bounded
+public metadata for the subscription feed, and download-completion markers are
+stored privately on the device.
+They are not linked to a YouTube account or a viewing history. Unsubscribing
+removes that channel and its feed entries; its last subscription cutoff is
+retained to reject outdated refresh results. Videos already saved offline remain
+until you delete them from **Downloads**. Clearing app data or uninstalling
+Plyvanta removes all subscription state.
 
 Saved offline metadata and media are retained only until the user deletes an
 item, resets the vault, clears app data, or uninstalls Plyvanta. They live in
@@ -409,7 +456,10 @@ Playing a link makes these network requests:
   play, and Media3 requests the selected direct stream. If the user explicitly
   saves an eligible video, Plyvanta requests that selected finite stream again
   while the app remains in the foreground and encrypts the response directly
-  into private storage. The source service and its delivery providers therefore
+  into private storage. A channel's opted-in automatic downloads make the same
+  extraction and finite-media requests in the background, encrypting responses
+  without unlocking saved items. The source service and its delivery providers
+  therefore
   receive the network address and ordinary request metadata needed to serve the
   playlist and videos.
 - **SponsorBlock:** Plyvanta computes the SHA-256 hash of the video ID and sends
@@ -418,6 +468,13 @@ Playing a link makes these network requests:
   not sent; Plyvanta matches the exact video ID inside the returned bucket before
   using any segment. Enabled category names are also included in the request. No
   SponsorBlock request is made when every skip category is disabled.
+
+Subscribing resolves the channel's public identity through YouTube. Foreground
+and periodic subscription checks request each subscribed channel's public feed
+from YouTube, without sign-in or account credentials. Opening a feed video or
+automatically saving it makes the same public-video and media requests
+described above. YouTube therefore receives the channel-feed requests and
+ordinary network request metadata.
 
 Separately, WorkManager periodically makes anonymous, read-only requests to
 GitHub's public repository and Releases APIs for immutable Plyvanta repository
@@ -465,6 +522,10 @@ can still observe requests according to their own privacy practices.
   sources remain streaming-only. Device loss, app uninstall, key invalidation,
   or storage corruption can make saved items permanently unrecoverable by
   design.
+- Subscription refreshes and automatic downloads can be delayed or stopped by
+  Android battery, network, app-standby, foreground-service, or force-stop
+  limits. The public channel feed's latest-15 limit can leave gaps after long
+  intervals between successful checks.
 - Update notifications are periodic rather than real-time and can be delayed by
   Android battery, network, app-standby, notification-permission, or force-stop
   behavior.

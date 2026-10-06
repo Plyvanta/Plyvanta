@@ -12,6 +12,8 @@ import app.plyvanta.extractor.OkHttpDownloader;
 import app.plyvanta.network.AppNetwork;
 import app.plyvanta.update.UpdateNotificationManager;
 import app.plyvanta.update.UpdateScheduler;
+import app.plyvanta.subscription.SubscriptionScheduler;
+import app.plyvanta.subscription.SubscriptionDownloadScheduler;
 
 public final class PlyvantaApplication extends Application {
     @Override
@@ -30,5 +32,7 @@ public final class PlyvantaApplication extends Application {
 
         UpdateNotificationManager.createChannel(this);
         UpdateScheduler.schedule(this);
+        SubscriptionScheduler.schedule(this);
+        SubscriptionDownloadScheduler.schedulePending(this);
     }
 }

@@ -10,9 +10,9 @@ Every production HTTP request uses its shared, dynamic call factories:
 
 | Traffic | Factory profile |
 | --- | --- |
-| YouTube video/playlist extraction | EXTRACTOR |
+| YouTube video/playlist/channel extraction and subscription feeds | EXTRACTOR |
 | Playback, HLS/DASH manifests, keys and segments | PLAYBACK |
-| Encrypted offline media downloads | OFFLINE |
+| Manual and background encrypted offline media downloads | OFFLINE |
 | SponsorBlock | SPONSOR |
 | Manual and background update checks/metadata | UPDATE |
 
@@ -20,6 +20,11 @@ Tor mode selects only a SOCKS proxy at `127.0.0.1` with a configurable port
 (default 9050). Destination names remain unresolved until they reach SOCKS;
 the local DNS callback rejects requests. Proxy failure cannot select a direct
 route. Normal mode preserves the platform proxy selector.
+
+Subscription refresh and automatic-download workers use these same factories
+after startup restores the saved route. They must fail closed when Orbot is
+unavailable and cancel in-flight requests when the route changes; background
+work must not create an independent client or retry on a direct route.
 
 Route changes save preferences synchronously, invalidate retained calls, cancel
 requests and open response bodies, and replace connection pools. Online playback
@@ -33,6 +38,10 @@ Browser downloads, report sharing and About links explicitly explain the other
 app's independent connection before handoff while Tor is enabled.
 
 ## Evidence
+
+The following results predate channel subscriptions and background offline
+downloads. Their device and live-Orbot behavior require separate verification;
+the results below do not establish that those new flows have been exercised.
 
 - All **219 JVM tests** passed, including eight router tests and existing
   extractor interruption and offline redirect-boundary tests.
