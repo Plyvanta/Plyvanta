@@ -10,13 +10,25 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 import java.io.IOException;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.io.InterruptedIOException;
+import java.net.ConnectException;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketTimeoutException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
+import okhttp3.Call;
 import okhttp3.HttpUrl;
 import okhttp3.Interceptor;
 import okhttp3.MediaType;
@@ -1142,6 +1154,8 @@ public final class GitHubReleaseClientTest {
                         36
                 )
         );
+        assertEquals(2, malformed.calls.get());
+        assertEquals(2, tooLarge.calls.get());
     }
 
     @Test
@@ -1183,6 +1197,272 @@ public final class GitHubReleaseClientTest {
         for (String userAgent : fixture.userAgents) {
             assertTrue(userAgent.startsWith("Plyvanta-Update-Checker/"));
         }
+    }
+
+    @Test
+    public void retriesATransientConnectionFailureOnceOnTheOriginalCall() throws IOException {
+        FixtureInterceptor fixture = currentReleaseFixture();
+        AtomicInteger attempts = new AtomicInteger();
+        AtomicInteger createdCalls = new AtomicInteger();
+        OkHttpClient httpClient = new OkHttpClient.Builder()
+                .addInterceptor(chain -> {
+                    if (attempts.incrementAndGet() == 1) {
+                        throw new ConnectException("Temporary connection failure");
+                    }
+                    return fixture.intercept(chain);
+                })
+                .build();
+        Call.Factory factory = request -> {
+            createdCalls.incrementAndGet();
+            return httpClient.newCall(request);
+        };
+
+        assertNull(fetchCurrent(new GitHubReleaseClient(
+                factory,
+                HttpUrl.get(GitHubReleaseClient.REPOSITORY_API_URL),
+                HttpUrl.get(GitHubReleaseClient.RELEASES_API_URL)
+        )));
+
+        assertEquals(4, attempts.get());
+        assertEquals(3, createdCalls.get());
+        assertEquals(3, fixture.calls.get());
+    }
+
+    @Test
+    public void doesNotKeepRetryingAConnectionFailure() {
+        AtomicInteger attempts = new AtomicInteger();
+        OkHttpClient httpClient = new OkHttpClient.Builder()
+                .addInterceptor(chain -> {
+                    attempts.incrementAndGet();
+                    throw new ConnectException("Connection unavailable");
+                })
+                .build();
+
+        assertThrows(ConnectException.class, () -> fetchCurrent(new GitHubReleaseClient(
+                httpClient,
+                HttpUrl.get(GitHubReleaseClient.REPOSITORY_API_URL),
+                HttpUrl.get(GitHubReleaseClient.RELEASES_API_URL)
+        )));
+
+        assertEquals(2, attempts.get());
+    }
+
+    @Test
+    public void doesNotRetryGitHubRateLimitResponses() {
+        for (int statusCode : new int[] {403, 429}) {
+            AtomicInteger attempts = new AtomicInteger();
+            OkHttpClient httpClient = new OkHttpClient.Builder()
+                    .addInterceptor(chain -> {
+                        attempts.incrementAndGet();
+                        return new Response.Builder()
+                                .request(chain.request())
+                                .protocol(Protocol.HTTP_1_1)
+                                .code(statusCode)
+                                .message("Rate limited")
+                                .body(ResponseBody.create("{}", FixtureInterceptor.JSON))
+                                .build();
+                    })
+                    .build();
+
+            GitHubReleaseClient.HttpException failure = assertThrows(
+                    GitHubReleaseClient.HttpException.class,
+                    () -> fetchCurrent(new GitHubReleaseClient(
+                            httpClient,
+                            HttpUrl.get(GitHubReleaseClient.REPOSITORY_API_URL),
+                            HttpUrl.get(GitHubReleaseClient.RELEASES_API_URL)
+                    ))
+            );
+
+            assertEquals(statusCode, failure.getStatusCode());
+            assertEquals(1, attempts.get());
+        }
+    }
+
+    @Test
+    public void doesNotRetryACanceledCallOntoANewRoute() {
+        AtomicInteger attempts = new AtomicInteger();
+        OkHttpClient httpClient = new OkHttpClient.Builder()
+                .addInterceptor(chain -> {
+                    attempts.incrementAndGet();
+                    chain.call().cancel();
+                    throw new ConnectException("Old network route canceled");
+                })
+                .build();
+
+        assertThrows(IOException.class, () -> fetchCurrent(new GitHubReleaseClient(
+                httpClient,
+                HttpUrl.get(GitHubReleaseClient.REPOSITORY_API_URL),
+                HttpUrl.get(GitHubReleaseClient.RELEASES_API_URL)
+        )));
+
+        assertEquals(1, attempts.get());
+    }
+
+    @Test
+    public void doesNotRetryWhenTheCheckingThreadIsInterrupted() {
+        AtomicInteger attempts = new AtomicInteger();
+        OkHttpClient httpClient = new OkHttpClient.Builder()
+                .addInterceptor(chain -> {
+                    attempts.incrementAndGet();
+                    Thread.currentThread().interrupt();
+                    throw new ConnectException("Interrupted connection");
+                })
+                .build();
+        try {
+            assertThrows(IOException.class, () -> fetchCurrent(new GitHubReleaseClient(
+                    httpClient,
+                    HttpUrl.get(GitHubReleaseClient.REPOSITORY_API_URL),
+                    HttpUrl.get(GitHubReleaseClient.RELEASES_API_URL)
+            )));
+            assertEquals(1, attempts.get());
+            assertTrue(Thread.currentThread().isInterrupted());
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
+    public void anAlreadyInterruptedCheckCreatesNoCalls() {
+        AtomicInteger createdCalls = new AtomicInteger();
+        Call.Factory factory = request -> {
+            createdCalls.incrementAndGet();
+            throw new AssertionError("Interrupted check must not create a call");
+        };
+        try {
+            Thread.currentThread().interrupt();
+            assertThrows(InterruptedIOException.class, () -> fetchCurrent(
+                    new GitHubReleaseClient(
+                            factory,
+                            HttpUrl.get(GitHubReleaseClient.REPOSITORY_API_URL),
+                            HttpUrl.get(GitHubReleaseClient.RELEASES_API_URL)
+                    )
+            ));
+            assertEquals(0, createdCalls.get());
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
+    public void exhaustedSharedBudgetStopsBeforeRequestingMetadata() {
+        FixtureInterceptor fixture = currentReleaseFixture();
+        AtomicLong clock = new AtomicLong();
+        OkHttpClient httpClient = new OkHttpClient.Builder()
+                .addInterceptor(chain -> {
+                    Response response = fixture.intercept(chain);
+                    clock.addAndGet(TimeUnit.MILLISECONDS.toNanos(600L));
+                    return response;
+                })
+                .build();
+
+        assertThrows(SocketTimeoutException.class, () -> fetchCurrent(new GitHubReleaseClient(
+                httpClient,
+                HttpUrl.get(GitHubReleaseClient.REPOSITORY_API_URL),
+                HttpUrl.get(GitHubReleaseClient.RELEASES_API_URL),
+                1_000L,
+                clock::get
+        )));
+
+        assertEquals(2, fixture.calls.get());
+        assertEquals(0, fixture.metadataCalls.get());
+    }
+
+    @Test
+    public void cumulativeSocketRequestsShareOneDeadline() throws Exception {
+        FixtureInterceptor fixture = currentReleaseFixture();
+        try (DelayedJsonServer server = new DelayedJsonServer(
+                fixture.repository,
+                fixture.releases,
+                fixture.metadataByDownloadUrl.get(metadataDownloadUrl("1.2.0")),
+                250L,
+                650L
+        )) {
+            OkHttpClient httpClient = new OkHttpClient.Builder()
+                    .retryOnConnectionFailure(false)
+                    .addInterceptor(chain -> chain.proceed(
+                            chain.request().url().host().equals("github.com")
+                                    ? chain.request().newBuilder()
+                                            .url(server.url("/metadata"))
+                                            .build()
+                                    : chain.request()
+                    ))
+                    .build();
+            GitHubReleaseClient releaseClient = new GitHubReleaseClient(
+                    httpClient,
+                    server.url("/repository"),
+                    server.url("/releases"),
+                    900L
+            );
+            long started = System.nanoTime();
+
+            assertThrows(SocketTimeoutException.class, () -> fetchCurrent(releaseClient));
+
+            long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+            assertEquals(3, server.requests.get());
+            assertTrue("Deadline fired too early: " + elapsedMillis, elapsedMillis >= 700L);
+            assertTrue("Sequential requests exceeded their budget: " + elapsedMillis,
+                    elapsedMillis < 1_800L);
+        }
+    }
+
+    @Test
+    public void checkBudgetDoesNotExtendAShorterExistingCallTimeout() throws Exception {
+        FixtureInterceptor fixture = currentReleaseFixture();
+        try (DelayedJsonServer server = new DelayedJsonServer(
+                fixture.repository,
+                fixture.releases,
+                fixture.metadataByDownloadUrl.get(metadataDownloadUrl("1.2.0")),
+                700L,
+                0L
+        )) {
+            OkHttpClient httpClient = new OkHttpClient.Builder()
+                    .callTimeout(250L, TimeUnit.MILLISECONDS)
+                    .retryOnConnectionFailure(false)
+                    .build();
+            GitHubReleaseClient releaseClient = new GitHubReleaseClient(
+                    httpClient,
+                    server.url("/repository"),
+                    server.url("/releases"),
+                    2_000L
+            );
+            long started = System.nanoTime();
+
+            assertThrows(IOException.class, () -> fetchCurrent(releaseClient));
+
+            long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+            assertEquals(1, server.requests.get());
+            assertTrue("Existing call timeout was extended: " + elapsedMillis,
+                    elapsedMillis < 1_000L);
+        }
+    }
+
+    private static UpdateRelease fetchCurrent(GitHubReleaseClient client) throws IOException {
+        return client.fetchLatestUpdate(
+                1_002_000L,
+                "1.2.0",
+                "app.plyvanta",
+                UpdateChannel.STABLE,
+                36
+        );
+    }
+
+    private static FixtureInterceptor currentReleaseFixture() {
+        return standardFixture(
+                releaseList(
+                        CANONICAL_REPOSITORY,
+                        false,
+                        false,
+                        "v1.2.0",
+                        standardAssets(
+                                CANONICAL_REPOSITORY,
+                                "1.2.0",
+                                SHA256,
+                                METADATA_ASSET_ID,
+                                APK_ASSET_ID
+                        )
+                ),
+                stableMetadata("1.2.0", 1_002_000L, SHA256)
+        );
     }
 
     private static GitHubReleaseClient client(FixtureInterceptor fixture) {
@@ -1454,6 +1734,90 @@ public final class GitHubReleaseClientTest {
                 "\"minimumSdk\":26",
                 "\"minimumSdk\":" + minimumSdk
         );
+    }
+
+    private static final class DelayedJsonServer implements AutoCloseable {
+        private final ServerSocket listener;
+        private final Thread worker;
+        private final AtomicInteger requests = new AtomicInteger();
+        private volatile Socket activeSocket;
+
+        private DelayedJsonServer(
+                String repository,
+                String releases,
+                String metadata,
+                long apiDelayMillis,
+                long metadataDelayMillis
+        ) throws IOException {
+            listener = new ServerSocket(0, 0, InetAddress.getByName("127.0.0.1"));
+            worker = new Thread(() -> {
+                while (!listener.isClosed()) {
+                    try (Socket socket = listener.accept()) {
+                        activeSocket = socket;
+                        socket.setSoTimeout(2_000);
+                        BufferedReader request = new BufferedReader(new InputStreamReader(
+                                socket.getInputStream(), StandardCharsets.US_ASCII
+                        ));
+                        String requestLine = request.readLine();
+                        if (requestLine == null) {
+                            continue;
+                        }
+                        String header;
+                        do {
+                            header = request.readLine();
+                        } while (header != null && !header.isEmpty());
+                        String path = requestLine.split(" ")[1];
+                        requests.incrementAndGet();
+                        Thread.sleep(path.equals("/metadata")
+                                ? metadataDelayMillis : apiDelayMillis);
+                        String json = path.equals("/repository") ? repository
+                                : path.equals("/releases") ? releases : metadata;
+                        byte[] body = json.getBytes(StandardCharsets.UTF_8);
+                        String responseHeaders = "HTTP/1.1 200 OK\r\n"
+                                + "Content-Type: application/json\r\n"
+                                + "Content-Length: " + body.length + "\r\n"
+                                + "Connection: close\r\n\r\n";
+                        socket.getOutputStream().write(
+                                responseHeaders.getBytes(StandardCharsets.US_ASCII)
+                        );
+                        socket.getOutputStream().write(body);
+                        socket.getOutputStream().flush();
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    } catch (IOException closedConnection) {
+                        // Deadline tests deliberately close their sockets before a reply.
+                        if (listener.isClosed()) {
+                            return;
+                        }
+                    } finally {
+                        activeSocket = null;
+                    }
+                }
+            }, "Plyvanta update deadline test server");
+            worker.setDaemon(true);
+            worker.start();
+        }
+
+        private HttpUrl url(String path) {
+            return new HttpUrl.Builder()
+                    .scheme("http")
+                    .host("127.0.0.1")
+                    .port(listener.getLocalPort())
+                    .encodedPath(path)
+                    .build();
+        }
+
+        @Override
+        public void close() throws Exception {
+            listener.close();
+            Socket socket = activeSocket;
+            if (socket != null) {
+                socket.close();
+            }
+            worker.interrupt();
+            worker.join(1_000L);
+        }
     }
 
     private static final class FixtureInterceptor implements Interceptor {

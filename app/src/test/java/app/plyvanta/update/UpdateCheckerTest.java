@@ -9,6 +9,7 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 import java.io.IOException;
+import java.net.SocketTimeoutException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -136,12 +137,39 @@ public final class UpdateCheckerTest {
         UpdateChecker.Result result = checker.check();
 
         assertSame(UpdateChecker.Status.RETRYABLE_FAILURE, result.getStatus());
+        assertSame(UpdateChecker.FailureReason.CONNECTION, result.getFailureReason());
         assertNull(result.getCheckedRelease());
         assertSame(storedRelease, result.getAvailableRelease());
         assertSame(storedRelease, store.release);
         assertEquals(0, store.clearCalls);
         assertEquals(0, store.storeCalls);
         assertFalse(notificationCancelled.get());
+    }
+
+    @Test
+    public void socketTimeoutHasSpecificFeedbackAndPreservesStoredRelease() {
+        assertFailurePreservesStoredRelease(
+                new SocketTimeoutException("GitHub did not respond"),
+                UpdateChecker.FailureReason.TIMEOUT
+        );
+    }
+
+    @Test
+    public void forbiddenAndRateLimitedResponsesHaveSpecificFeedback() {
+        for (int statusCode : new int[] {403, 429}) {
+            assertFailurePreservesStoredRelease(
+                    new GitHubReleaseClient.HttpException(statusCode),
+                    UpdateChecker.FailureReason.RATE_LIMIT
+            );
+        }
+    }
+
+    @Test
+    public void otherHttpFailureIsNotReportedAsRateLimited() {
+        assertFailurePreservesStoredRelease(
+                new GitHubReleaseClient.HttpException(503),
+                UpdateChecker.FailureReason.CONNECTION
+        );
     }
 
     @Test
@@ -377,6 +405,7 @@ public final class UpdateCheckerTest {
         UpdateChecker.Result result = checker.check();
 
         assertSame(UpdateChecker.Status.RETRYABLE_FAILURE, result.getStatus());
+        assertSame(UpdateChecker.FailureReason.STORAGE, result.getFailureReason());
         assertSame(fetchedRelease, result.getCheckedRelease());
         assertNull(result.getAvailableRelease());
         assertNull(store.release);
@@ -405,12 +434,94 @@ public final class UpdateCheckerTest {
         UpdateChecker.Result result = checker.check();
 
         assertSame(UpdateChecker.Status.RETRYABLE_FAILURE, result.getStatus());
+        assertSame(UpdateChecker.FailureReason.STORAGE, result.getFailureReason());
         assertSame(fetchedRelease, result.getCheckedRelease());
         assertSame(storedRelease, result.getAvailableRelease());
         assertSame(storedRelease, store.release);
         assertEquals(0, store.clearCalls);
         assertEquals(1, store.storeCalls);
         assertFalse(notificationCancelled.get());
+    }
+
+    @Test
+    public void manualCheckReturnsPromptlyWithoutSideEffectsDuringWorkerCompletion()
+            throws Exception {
+        CountDownLatch workerCompletionEntered = new CountDownLatch(1);
+        CountDownLatch releaseWorkerCompletion = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        Future<UpdateChecker.Result> workerFuture = null;
+        Future<UpdateChecker.Result> manualFuture = null;
+        UpdateChecker workerChecker = checker(
+                installedAppSource(),
+                (code, version, packageName, channel, sdk) -> null,
+                new FakeReleaseStore(null, true),
+                new AtomicBoolean()
+        );
+        UpdateRelease storedRelease = release(5L);
+        FakeReleaseStore manualStore = new FakeReleaseStore(storedRelease, true);
+        AtomicBoolean notificationCancelled = new AtomicBoolean();
+        AtomicInteger installedAppReads = new AtomicInteger();
+        AtomicInteger fetchCalls = new AtomicInteger();
+        UpdateChecker manualChecker = checker(
+                () -> {
+                    installedAppReads.incrementAndGet();
+                    return installedAppSource().load();
+                },
+                (code, version, packageName, channel, sdk) -> {
+                    fetchCalls.incrementAndGet();
+                    return storedRelease;
+                },
+                manualStore,
+                notificationCancelled
+        );
+
+        try {
+            workerFuture = executor.submit(() -> workerChecker.checkAndComplete(result -> {
+                workerCompletionEntered.countDown();
+                awaitLatch(releaseWorkerCompletion);
+                return result;
+            }));
+            assertTrue(workerCompletionEntered.await(5, TimeUnit.SECONDS));
+
+            manualFuture = executor.submit(manualChecker::checkManually);
+            // The worker still owns the lock; waiting for it would time out here.
+            UpdateChecker.Result busy = manualFuture.get(1, TimeUnit.SECONDS);
+            assertSame(UpdateChecker.Status.RETRYABLE_FAILURE, busy.getStatus());
+            assertSame(UpdateChecker.FailureReason.CHECK_IN_PROGRESS, busy.getFailureReason());
+            assertNull(busy.getCheckedRelease());
+            assertNull(busy.getAvailableRelease());
+            assertEquals(0, installedAppReads.get());
+            assertEquals(0, fetchCalls.get());
+            assertEquals(0, manualStore.readCalls);
+            assertEquals(0, manualStore.clearCalls);
+            assertEquals(0, manualStore.storeCalls);
+            assertSame(storedRelease, manualStore.release);
+            assertFalse(notificationCancelled.get());
+
+            releaseWorkerCompletion.countDown();
+            assertSame(UpdateChecker.Status.SUCCESS,
+                    workerFuture.get(5, TimeUnit.SECONDS).getStatus());
+            UpdateChecker.Result retried = manualChecker.checkManually();
+            assertSame(UpdateChecker.Status.SUCCESS, retried.getStatus());
+            assertSame(UpdateChecker.FailureReason.NONE, retried.getFailureReason());
+            assertSame(storedRelease, retried.getAvailableRelease());
+            assertEquals(1, installedAppReads.get());
+            assertEquals(1, fetchCalls.get());
+            assertEquals(1, manualStore.readCalls);
+            assertEquals(0, manualStore.clearCalls);
+            assertEquals(0, manualStore.storeCalls);
+            assertFalse(notificationCancelled.get());
+        } finally {
+            releaseWorkerCompletion.countDown();
+            if (workerFuture != null) {
+                workerFuture.cancel(true);
+            }
+            if (manualFuture != null) {
+                manualFuture.cancel(true);
+            }
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
     }
 
     @Test
@@ -489,6 +600,34 @@ public final class UpdateCheckerTest {
             }
             executor.shutdownNow();
         }
+    }
+
+    private static void assertFailurePreservesStoredRelease(
+            IOException failure,
+            UpdateChecker.FailureReason expectedReason
+    ) {
+        UpdateRelease storedRelease = release(5L);
+        FakeReleaseStore store = new FakeReleaseStore(storedRelease, true);
+        AtomicBoolean notificationCancelled = new AtomicBoolean();
+        UpdateChecker checker = checker(
+                installedAppSource(),
+                (code, version, packageName, channel, sdk) -> {
+                    throw failure;
+                },
+                store,
+                notificationCancelled
+        );
+
+        UpdateChecker.Result result = checker.check();
+
+        assertSame(UpdateChecker.Status.RETRYABLE_FAILURE, result.getStatus());
+        assertSame(expectedReason, result.getFailureReason());
+        assertNull(result.getCheckedRelease());
+        assertSame(storedRelease, result.getAvailableRelease());
+        assertSame(storedRelease, store.release);
+        assertEquals(0, store.clearCalls);
+        assertEquals(0, store.storeCalls);
+        assertFalse(notificationCancelled.get());
     }
 
     private static UpdateChecker checker(

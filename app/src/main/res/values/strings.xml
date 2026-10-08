@@ -53,6 +53,12 @@
     <string name="check_again">Check again</string>
     <string name="update_check_unverified">A newer release exists, but Plyvanta couldn’t verify it. Try again later or use the official GitHub Releases page.</string>
     <string name="update_check_error">Couldn’t check for updates. Check your connection and try again.</string>
+    <string name="update_check_tor_error">Couldn’t reach GitHub through Tor. Check that Orbot is connected, then try again.</string>
+    <string name="update_check_timeout">GitHub didn’t respond in time. Try again.</string>
+    <string name="update_check_tor_timeout">GitHub didn’t respond through Tor in time. Check Orbot and try again.</string>
+    <string name="update_check_rate_limit">GitHub temporarily refused this update check. Try again later.</string>
+    <string name="update_check_storage_error">Couldn’t save the update information. Try again.</string>
+    <string name="update_check_in_progress">An update check is already running. Try again shortly.</string>
     <string name="try_again">Try again</string>
     <string name="update_available">Update available</string>
     <string name="update_available_detail">Version %1$s is ready to download from GitHub</string>

@@ -7,10 +7,12 @@ import android.content.pm.PackageManager;
 import android.os.Build;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.util.Objects;
+import java.util.concurrent.locks.ReentrantLock;
 
 public final class UpdateChecker {
-    private static final Object CHECK_LOCK = new Object();
+    private static final ReentrantLock CHECK_LOCK = new ReentrantLock();
     private static volatile ReleaseSource debugReleaseSourceOverride;
 
     public enum Status {
@@ -20,19 +22,39 @@ public final class UpdateChecker {
         PERMANENT_FAILURE
     }
 
+    public enum FailureReason {
+        NONE,
+        CONNECTION,
+        TIMEOUT,
+        RATE_LIMIT,
+        STORAGE,
+        CHECK_IN_PROGRESS
+    }
+
     public static final class Result {
         private final Status status;
         private final UpdateRelease checkedRelease;
         private final UpdateRelease availableRelease;
+        private final FailureReason failureReason;
 
         private Result(
                 Status status,
                 UpdateRelease checkedRelease,
                 UpdateRelease availableRelease
         ) {
+            this(status, checkedRelease, availableRelease, FailureReason.NONE);
+        }
+
+        private Result(
+                Status status,
+                UpdateRelease checkedRelease,
+                UpdateRelease availableRelease,
+                FailureReason failureReason
+        ) {
             this.status = Objects.requireNonNull(status, "status");
             this.checkedRelease = checkedRelease;
             this.availableRelease = availableRelease;
+            this.failureReason = Objects.requireNonNull(failureReason, "failureReason");
         }
 
         public Status getStatus() {
@@ -45,6 +67,10 @@ public final class UpdateChecker {
 
         public UpdateRelease getAvailableRelease() {
             return availableRelease;
+        }
+
+        public FailureReason getFailureReason() {
+            return failureReason;
         }
     }
 
@@ -140,10 +166,26 @@ public final class UpdateChecker {
         return checkAndComplete(result -> result);
     }
 
+    /** Manual checks must not queue behind a slow background network transaction. */
+    public Result checkManually() {
+        if (!CHECK_LOCK.tryLock()) {
+            return new Result(Status.RETRYABLE_FAILURE, null, null,
+                    FailureReason.CHECK_IN_PROGRESS);
+        }
+        try {
+            return runSerializedCheck();
+        } finally {
+            CHECK_LOCK.unlock();
+        }
+    }
+
     <T> T checkAndComplete(Completion<T> completion) {
         Objects.requireNonNull(completion, "completion");
-        synchronized (CHECK_LOCK) {
+        CHECK_LOCK.lock();
+        try {
             return completion.complete(runSerializedCheck());
+        } finally {
+            CHECK_LOCK.unlock();
         }
     }
 
@@ -183,7 +225,8 @@ public final class UpdateChecker {
             return new Result(
                     Status.RETRYABLE_FAILURE,
                     null,
-                    availableStoredRelease
+                    availableStoredRelease,
+                    failureReason(transientFailure)
             );
         }
 
@@ -201,7 +244,8 @@ public final class UpdateChecker {
             return new Result(
                     Status.RETRYABLE_FAILURE,
                     fetchedRelease,
-                    availableStoredRelease
+                    availableStoredRelease,
+                    FailureReason.STORAGE
             );
         }
         if (storedRelease == null
@@ -212,6 +256,19 @@ public final class UpdateChecker {
             notificationCanceller.cancel();
         }
         return new Result(Status.SUCCESS, fetchedRelease, fetchedRelease);
+    }
+
+    private static FailureReason failureReason(IOException failure) {
+        if (failure instanceof GitHubReleaseClient.HttpException) {
+            int statusCode = ((GitHubReleaseClient.HttpException) failure).getStatusCode();
+            if (statusCode == 403 || statusCode == 429) {
+                return FailureReason.RATE_LIMIT;
+            }
+        }
+        if (failure instanceof InterruptedIOException && !Thread.currentThread().isInterrupted()) {
+            return FailureReason.TIMEOUT;
+        }
+        return FailureReason.CONNECTION;
     }
 
     private static Context applicationContext(Context context) {

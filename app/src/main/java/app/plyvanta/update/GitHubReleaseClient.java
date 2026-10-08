@@ -7,12 +7,18 @@ import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
+import java.net.ConnectException;
+import java.net.SocketTimeoutException;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
 
 import app.plyvanta.network.AppNetwork;
 
@@ -40,16 +46,23 @@ public final class GitHubReleaseClient {
     private static final String GITHUB_ASSET_ACCEPT = "application/octet-stream";
     private static final String APK_CONTENT_TYPE =
             "application/vnd.android.package-archive";
+    private static final long DIRECT_CHECK_TIMEOUT_MILLIS = 30_000L;
+    private static final long TOR_CHECK_TIMEOUT_MILLIS = 60_000L;
 
     private final Call.Factory httpClient;
     private final HttpUrl repositoryApiUrl;
     private final HttpUrl releasesApiUrl;
+    private final LongSupplier checkTimeoutMillis;
+    private final LongSupplier nanoTime;
 
     public GitHubReleaseClient() {
         this(
                 AppNetwork.calls(AppNetwork.Profile.UPDATE),
                 HttpUrl.get(REPOSITORY_API_URL),
-                HttpUrl.get(RELEASES_API_URL)
+                HttpUrl.get(RELEASES_API_URL),
+                () -> AppNetwork.isTorEnabled()
+                        ? TOR_CHECK_TIMEOUT_MILLIS : DIRECT_CHECK_TIMEOUT_MILLIS,
+                System::nanoTime
         );
     }
 
@@ -58,10 +71,48 @@ public final class GitHubReleaseClient {
             HttpUrl repositoryApiUrl,
             HttpUrl releasesApiUrl
     ) {
+        this(httpClient, repositoryApiUrl, releasesApiUrl,
+                DIRECT_CHECK_TIMEOUT_MILLIS);
+    }
+
+    GitHubReleaseClient(
+            Call.Factory httpClient,
+            HttpUrl repositoryApiUrl,
+            HttpUrl releasesApiUrl,
+            long checkTimeoutMillis
+    ) {
+        this(httpClient, repositoryApiUrl, releasesApiUrl,
+                checkTimeoutMillis, System::nanoTime);
+    }
+
+    GitHubReleaseClient(
+            Call.Factory httpClient,
+            HttpUrl repositoryApiUrl,
+            HttpUrl releasesApiUrl,
+            long checkTimeoutMillis,
+            LongSupplier nanoTime
+    ) {
+        this(httpClient, repositoryApiUrl, releasesApiUrl,
+                () -> checkTimeoutMillis, nanoTime);
+        if (checkTimeoutMillis <= 0L) {
+            throw new IllegalArgumentException("checkTimeoutMillis must be positive");
+        }
+    }
+
+    private GitHubReleaseClient(
+            Call.Factory httpClient,
+            HttpUrl repositoryApiUrl,
+            HttpUrl releasesApiUrl,
+            LongSupplier checkTimeoutMillis,
+            LongSupplier nanoTime
+    ) {
         this.httpClient = Objects.requireNonNull(httpClient, "httpClient");
         this.repositoryApiUrl =
                 Objects.requireNonNull(repositoryApiUrl, "repositoryApiUrl");
         this.releasesApiUrl = Objects.requireNonNull(releasesApiUrl, "releasesApiUrl");
+        this.checkTimeoutMillis =
+                Objects.requireNonNull(checkTimeoutMillis, "checkTimeoutMillis");
+        this.nanoTime = Objects.requireNonNull(nanoTime, "nanoTime");
     }
 
     public UpdateRelease fetchLatestUpdate(
@@ -84,11 +135,15 @@ public final class GitHubReleaseClient {
             );
         }
 
+        CheckBudget budget = new CheckBudget(
+                TimeUnit.MILLISECONDS.toNanos(checkTimeoutMillis.getAsLong()),
+                nanoTime
+        );
         TrustedRepository repository = parseTrustedRepository(
-                getJson(repositoryApiUrl, MAX_REPOSITORY_RESPONSE_BYTES),
+                getJson(repositoryApiUrl, MAX_REPOSITORY_RESPONSE_BYTES, budget),
                 TRUSTED_REPOSITORY_ID
         );
-        String releasesJson = getJson(releasesApiUrl, MAX_RELEASE_RESPONSE_BYTES);
+        String releasesJson = getJson(releasesApiUrl, MAX_RELEASE_RESPONSE_BYTES, budget);
         ParsedReleaseList parsedReleases = parseReleaseList(
                 releasesJson,
                 channel,
@@ -107,6 +162,7 @@ public final class GitHubReleaseClient {
                 installedVersionName
         );
         for (ReleaseDescriptor release : releasesToVerify) {
+            budget.requireRemaining();
             AssetDescriptor metadataAsset = release.singleMetadataAsset();
             if (metadataAsset == null
                     || !UpdateRelease.isTrustedAssetApiUrl(
@@ -133,7 +189,8 @@ public final class GitHubReleaseClient {
             String metadataJson = getJson(
                     HttpUrl.get(metadataAsset.downloadUrl),
                     MAX_METADATA_RESPONSE_BYTES,
-                    GITHUB_ASSET_ACCEPT + ", application/json"
+                    GITHUB_ASSET_ACCEPT + ", application/json",
+                    budget
             );
             UpdateMetadata metadata = parseMetadata(metadataJson);
             if (metadata == null
@@ -269,6 +326,7 @@ public final class GitHubReleaseClient {
                 bestCandidate = candidate;
             }
         }
+        budget.requireRemaining();
         if (bestCandidate != null) {
             boolean candidateSupersedesRejectedRelease =
                     highestRejectedNewerVersion == null
@@ -293,12 +351,14 @@ public final class GitHubReleaseClient {
         );
     }
 
-    private String getJson(HttpUrl url, int maximumBytes) throws IOException {
-        return getJson(url, maximumBytes, GITHUB_JSON_ACCEPT);
+    private String getJson(HttpUrl url, int maximumBytes, CheckBudget budget)
+            throws IOException {
+        return getJson(url, maximumBytes, GITHUB_JSON_ACCEPT, budget);
     }
 
-    private String getJson(HttpUrl url, int maximumBytes, String accept)
+    private String getJson(HttpUrl url, int maximumBytes, String accept, CheckBudget budget)
             throws IOException {
+        budget.requireRemaining();
         Request request = new Request.Builder()
                 .url(url)
                 .get()
@@ -306,18 +366,54 @@ public final class GitHubReleaseClient {
                 .header("X-GitHub-Api-Version", "2022-11-28")
                 .header("User-Agent", USER_AGENT)
                 .build();
-        try (Response response = httpClient.newCall(request).execute()) {
-            if (response.code() != 200) {
-                throw new IOException(
-                        "Plyvanta update request failed with HTTP " + response.code()
-                );
+        Call call = httpClient.newCall(request);
+        for (int attempt = 0; attempt < 2; attempt++) {
+            long remainingNanos = budget.requireRemaining();
+            if (call.isCanceled()) {
+                throw new IOException("Plyvanta update request was canceled");
             }
-            ResponseBody body = response.body();
-            if (body == null) {
-                throw new IOException("Plyvanta update request returned no response body");
+            long existingTimeoutNanos = call.timeout().timeoutNanos();
+            call.timeout().timeout(
+                    existingTimeoutNanos == 0L
+                            ? remainingNanos
+                            : Math.min(existingTimeoutNanos, remainingNanos),
+                    TimeUnit.NANOSECONDS
+            );
+            try (Response response = call.execute()) {
+                if (response.code() != 200) {
+                    throw new HttpException(response.code());
+                }
+                ResponseBody body = response.body();
+                if (body == null) {
+                    throw new IOException("Plyvanta update request returned no response body");
+                }
+                String json = readBoundedBody(body, maximumBytes);
+                budget.requireRemaining();
+                return json;
+            } catch (IOException failure) {
+                if (Thread.currentThread().isInterrupted()) {
+                    throw failure;
+                }
+                if (budget.remainingNanos() <= 0L) {
+                    SocketTimeoutException timedOut = CheckBudget.timedOut();
+                    timedOut.initCause(failure);
+                    throw timedOut;
+                }
+                if (attempt != 0 || call.isCanceled() || !isTransientConnectionFailure(failure)) {
+                    throw failure;
+                }
+                // RoutedCall.clone keeps the original route generation. A setting change
+                // between failure and retry therefore cancels the retry as well.
+                call = call.clone();
             }
-            return readBoundedBody(body, maximumBytes);
         }
+        throw new AssertionError("Update request exceeded its retry limit");
+    }
+
+    private static boolean isTransientConnectionFailure(IOException failure) {
+        return failure instanceof ConnectException
+                || failure instanceof UnknownHostException
+                || failure instanceof SocketTimeoutException;
     }
 
     static TrustedRepository parseTrustedRepository(
@@ -625,6 +721,50 @@ public final class GitHubReleaseClient {
             return null;
         }
         return longValue;
+    }
+
+    public static final class HttpException extends IOException {
+        private final int statusCode;
+
+        HttpException(int statusCode) {
+            super("Plyvanta update request failed with HTTP " + statusCode);
+            this.statusCode = statusCode;
+        }
+
+        public int getStatusCode() {
+            return statusCode;
+        }
+    }
+
+    private static final class CheckBudget {
+        private final long startedNanos;
+        private final long timeoutNanos;
+        private final LongSupplier nanoTime;
+
+        private CheckBudget(long timeoutNanos, LongSupplier nanoTime) {
+            this.nanoTime = nanoTime;
+            this.startedNanos = nanoTime.getAsLong();
+            this.timeoutNanos = timeoutNanos;
+        }
+
+        private long remainingNanos() {
+            return timeoutNanos - (nanoTime.getAsLong() - startedNanos);
+        }
+
+        private long requireRemaining() throws IOException {
+            if (Thread.currentThread().isInterrupted()) {
+                throw new InterruptedIOException("Plyvanta update check was interrupted");
+            }
+            long remainingNanos = remainingNanos();
+            if (remainingNanos <= 0L) {
+                throw timedOut();
+            }
+            return remainingNanos;
+        }
+
+        private static SocketTimeoutException timedOut() {
+            return new SocketTimeoutException("Plyvanta update check timed out");
+        }
     }
 
     public static final class UnverifiedReleaseException extends IOException {

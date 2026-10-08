@@ -155,6 +155,7 @@ public final class MainActivity extends ComponentActivity {
     private final ExecutorService playlistResolverExecutor =
             Executors.newSingleThreadExecutor();
     private final ExecutorService updateCheckExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService manualUpdateCheckExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService offlineExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService torCheckExecutor = Executors.newSingleThreadExecutor();
     private final AtomicInteger torSettingsGeneration = new AtomicInteger();
@@ -167,6 +168,8 @@ public final class MainActivity extends ComponentActivity {
             new PlaybackSessionState();
     private final ManualUpdateCheckController manualUpdateCheckController =
             new ManualUpdateCheckController();
+    private int manualUpdateCheckErrorMessage = R.string.update_check_error;
+    private boolean manualUpdateCheckUsesTor;
 
     private FrameLayout root;
     private LinearLayout appContent;
@@ -2661,12 +2664,13 @@ public final class MainActivity extends ComponentActivity {
         if (destroyed || !manualUpdateCheckController.start()) {
             return;
         }
+        manualUpdateCheckUsesTor = AppNetwork.isTorEnabled();
         renderManualUpdateCheckState();
         Context applicationContext = getApplicationContext();
-        updateCheckExecutor.execute(() -> {
+        manualUpdateCheckExecutor.execute(() -> {
             UpdateChecker.Result result;
             try {
-                result = new UpdateChecker(applicationContext).check();
+                result = new UpdateChecker(applicationContext).checkManually();
             } catch (RuntimeException unexpectedFailure) {
                 result = null;
             }
@@ -2680,6 +2684,7 @@ public final class MainActivity extends ComponentActivity {
             return;
         }
         UpdateChecker.Status status = result == null ? null : result.getStatus();
+        manualUpdateCheckErrorMessage = manualUpdateCheckErrorMessage(result);
         boolean updateAvailable =
                 result != null && result.getAvailableRelease() != null;
         ManualUpdateCheckController.Completion completion =
@@ -2706,7 +2711,7 @@ public final class MainActivity extends ComponentActivity {
                     == ManualUpdateCheckController.State.UNVERIFIED) {
                 feedbackMessage = R.string.update_check_unverified;
             } else {
-                feedbackMessage = R.string.update_check_error;
+                feedbackMessage = manualUpdateCheckErrorMessage;
             }
             Toast.makeText(
                     this,
@@ -2714,6 +2719,30 @@ public final class MainActivity extends ComponentActivity {
                     Toast.LENGTH_LONG
             ).show();
         }
+    }
+
+    private int manualUpdateCheckErrorMessage(UpdateChecker.Result result) {
+        if (result != null) {
+            switch (result.getFailureReason()) {
+                case CHECK_IN_PROGRESS:
+                    return R.string.update_check_in_progress;
+                case RATE_LIMIT:
+                    return R.string.update_check_rate_limit;
+                case STORAGE:
+                    return R.string.update_check_storage_error;
+                case TIMEOUT:
+                    return manualUpdateCheckUsesTor
+                            ? R.string.update_check_tor_timeout
+                            : R.string.update_check_timeout;
+                case CONNECTION:
+                    return manualUpdateCheckUsesTor
+                            ? R.string.update_check_tor_error
+                            : R.string.update_check_error;
+                default:
+                    break;
+            }
+        }
+        return R.string.update_check_error;
     }
 
     private void renderManualUpdateCheckState() {
@@ -2740,7 +2769,7 @@ public final class MainActivity extends ComponentActivity {
                 activeUpdateCheckAction.setEnabled(true);
                 break;
             case ERROR:
-                activeUpdateCheckDetail.setText(R.string.update_check_error);
+                activeUpdateCheckDetail.setText(manualUpdateCheckErrorMessage);
                 activeUpdateCheckDetail.setTextColor(getColor(R.color.coral));
                 activeUpdateCheckAction.setText(R.string.try_again);
                 activeUpdateCheckAction.setEnabled(true);
@@ -3782,6 +3811,7 @@ public final class MainActivity extends ComponentActivity {
         videoResolverExecutor.shutdownNow();
         playlistResolverExecutor.shutdownNow();
         updateCheckExecutor.shutdownNow();
+        manualUpdateCheckExecutor.shutdownNow();
         offlineExecutor.shutdownNow();
         torCheckExecutor.shutdownNow();
         torSettingsGeneration.incrementAndGet();
