@@ -15,6 +15,7 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.os.Build;
 import android.os.SystemClock;
 import android.service.notification.StatusBarNotification;
@@ -32,14 +33,20 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import java.net.ConnectException;
 import java.util.ArrayDeque;
 import java.util.Collection;
 import java.util.Deque;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.TimeUnit;
 
 import app.plyvanta.MainActivity;
 import app.plyvanta.R;
+import app.plyvanta.network.AppNetwork;
 
 @RunWith(AndroidJUnit4.class)
 public final class UpdateNotificationNavigationTest {
@@ -191,6 +198,79 @@ public final class UpdateNotificationNavigationTest {
 
         UpdateRelease storedRelease = updatePreferences.availableRelease();
         assertEquals(release, storedRelease);
+    }
+
+    @Test
+    @SdkSuppress(minSdkVersion = 36)
+    public void manualTorConnectionFailureShowsHelpfulFeedbackAndAllowsRetry() {
+        assertTrue("Tor feedback test must target the separate debug app",
+                context.getPackageName().endsWith(".debug"));
+        AppNetwork.initialize(context);
+        SharedPreferences networkPreferences = context.getSharedPreferences(
+                "plyvanta_network", Context.MODE_PRIVATE);
+        Map<String, ?> originalValues = new HashMap<>(networkPreferences.getAll());
+        boolean originalEnabled = AppNetwork.isTorEnabled();
+        int originalPort = AppNetwork.torPort();
+        try {
+            AppNetwork.setTorEnabled(true, AppNetwork.DEFAULT_TOR_PORT);
+            UpdateChecker.setDebugReleaseSourceOverrideForTests(
+                    (code, version, packageName, channel, sdk) -> {
+                        throw new ConnectException("Orbot connection fixture failed");
+                    });
+            launchMainActivity();
+            assertTrue(clickContentDescription(context.getString(R.string.settings)));
+            assertTrue(waitForText("Plyvanta settings"));
+            assertTrue(clickText(context.getString(R.string.check_for_updates_now)));
+            assertTrue(waitForText(context.getString(R.string.update_check_tor_error)));
+            assertTrue(AppNetwork.isTorEnabled());
+
+            installFakeReleaseSource(null);
+            assertTrue(clickText(context.getString(R.string.try_again)));
+            assertTrue(waitForText(context.getString(R.string.update_check_up_to_date)));
+            assertTrue(waitUntilTextIsAbsent(context.getString(R.string.update_check_tor_error)));
+            assertTrue(AppNetwork.isTorEnabled());
+            assertNull(new UpdatePreferences(context).availableRelease());
+        } finally {
+            try {
+                AppNetwork.setTorEnabled(originalEnabled, originalPort);
+            } finally {
+                SharedPreferences.Editor editor = networkPreferences.edit();
+                restoreNetworkPreference(editor, originalValues, "tor_enabled");
+                restoreNetworkPreference(editor, originalValues, "tor_socks_port");
+                assertTrue("Could not restore original network preferences", editor.commit());
+            }
+        }
+    }
+
+    private static void restoreNetworkPreference(
+            SharedPreferences.Editor editor,
+            Map<String, ?> values,
+            String key
+    ) {
+        if (!values.containsKey(key)) {
+            editor.remove(key);
+            return;
+        }
+        Object value = values.get(key);
+        if (value instanceof Boolean) {
+            editor.putBoolean(key, (Boolean) value);
+        } else if (value instanceof Integer) {
+            editor.putInt(key, (Integer) value);
+        } else if (value instanceof Long) {
+            editor.putLong(key, (Long) value);
+        } else if (value instanceof Float) {
+            editor.putFloat(key, (Float) value);
+        } else if (value instanceof String) {
+            editor.putString(key, (String) value);
+        } else if (value instanceof Set<?>) {
+            Set<String> strings = new HashSet<>();
+            for (Object item : (Set<?>) value) {
+                strings.add((String) item);
+            }
+            editor.putStringSet(key, strings);
+        } else {
+            throw new AssertionError("Unsupported network preference type for " + key);
+        }
     }
 
     private Activity launchMainActivity() {

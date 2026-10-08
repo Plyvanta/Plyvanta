@@ -228,14 +228,14 @@ previews cannot be confused. It also writes the release metadata that future
 installed versions require before trusting an update:
 
 ```text
-app/build/outputs/preview/Plyvanta-1.5.0-debug.4.apk
-app/build/outputs/preview/Plyvanta-1.5.0-debug.4-update.json
+app/build/outputs/preview/Plyvanta-1.5.1-debug.4.apk
+app/build/outputs/preview/Plyvanta-1.5.1-debug.4-update.json
 ```
 
 Install it on a connected device or emulator with:
 
 ```sh
-adb install -r app/build/outputs/preview/Plyvanta-1.5.0-debug.4.apk
+adb install -r app/build/outputs/preview/Plyvanta-1.5.1-debug.4.apk
 ```
 
 With one emulator or device connected, verify the exact packaged artifact before
@@ -243,8 +243,8 @@ distribution:
 
 ```sh
 scripts/smoke-test-apk.sh \
-  app/build/outputs/preview/Plyvanta-1.5.0-debug.4.apk \
-  app/build/outputs/preview/Plyvanta-1.5.0-debug.4-update.json \
+  app/build/outputs/preview/Plyvanta-1.5.1-debug.4.apk \
+  app/build/outputs/preview/Plyvanta-1.5.1-debug.4-update.json \
   f316b684e87b4df6deb4c9fc987e530e7c3fae9810e6a3371b0cc0ea05f179f1
 ```
 
@@ -298,8 +298,8 @@ The task refuses a partially configured signing identity and writes the three
 upload-ready assets to:
 
 ```text
-app/build/outputs/stable/Plyvanta-1.5.0.apk
-app/build/outputs/stable/Plyvanta-1.5.0-update.json
+app/build/outputs/stable/Plyvanta-1.5.1.apk
+app/build/outputs/stable/Plyvanta-1.5.1-update.json
 app/build/outputs/stable/SHA256SUMS
 ```
 
@@ -307,8 +307,8 @@ Before distribution, install and exercise the exact packaged artifact:
 
 ```sh
 scripts/smoke-test-apk.sh \
-  app/build/outputs/stable/Plyvanta-1.5.0.apk \
-  app/build/outputs/stable/Plyvanta-1.5.0-update.json \
+  app/build/outputs/stable/Plyvanta-1.5.1.apk \
+  app/build/outputs/stable/Plyvanta-1.5.1-update.json \
   2085e2b0c5bbd6273203f2aa0064b0f6f291a43746f9989dd0cea30e6cec4d8e
 ```
 
